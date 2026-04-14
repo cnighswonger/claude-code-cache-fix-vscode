@@ -1,5 +1,7 @@
 # Claude Code Cache Fix — VS Code Extension
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](https://opensource.org/licenses/MIT) [![GitHub release](https://img.shields.io/github/v/release/cnighswonger/claude-code-cache-fix-vscode)](https://github.com/cnighswonger/claude-code-cache-fix-vscode/releases/latest)
+
 One-click activation of [claude-code-cache-fix](https://github.com/cnighswonger/claude-code-cache-fix) for Claude Code sessions in VS Code.
 
 ## What it does
