@@ -51,6 +51,19 @@ let preloadUrl = preloadPath.replace(/\\/g, '/');
 preloadUrl = preloadUrl.replace(/ /g, '%20');
 if (!preloadUrl.startsWith('/')) preloadUrl = '/' + preloadUrl;
 
+// Read VS Code settings from a config file the extension writes on enable
+// This bridges VS Code settings into env vars for the interceptor
+const configPath = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'cache-fix-vscode-config.json');
+try {
+  if (fs.existsSync(configPath)) {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (config.debug) process.env.CACHE_FIX_DEBUG = '1';
+    if (config.stripGitStatus) process.env.CACHE_FIX_STRIP_GIT_STATUS = '1';
+    if (config.outputEfficiencyReplacement) process.env.CACHE_FIX_OUTPUT_EFFICIENCY_REPLACEMENT = config.outputEfficiencyReplacement;
+    if (config.imageKeepLast > 0) process.env.CACHE_FIX_IMAGE_KEEP_LAST = String(config.imageKeepLast);
+  }
+} catch {}
+
 // Set NODE_OPTIONS
 const existingOpts = process.env.NODE_OPTIONS || '';
 process.env.NODE_OPTIONS = `--import file://${preloadUrl} ${existingOpts}`.trim();

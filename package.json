@@ -2,12 +2,12 @@
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
   "description": "Automatically loads the claude-code-cache-fix interceptor for Claude Code sessions in VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cnighswonger/claude-code-cache-fix"
+    "url": "https://github.com/cnighswonger/claude-code-cache-fix-vscode"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -41,7 +41,35 @@
         "command": "claude-code-cache-fix.status",
         "title": "Claude Code Cache Fix: Show Status"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Claude Code Cache Fix",
+      "properties": {
+        "claude-code-cache-fix.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable debug logging to ~/.claude/cache-fix-debug.log"
+        },
+        "claude-code-cache-fix.stripGitStatus": {
+          "type": "boolean",
+          "default": false,
+          "description": "Strip volatile git-status from system prompt for prefix stability (opt-in)"
+        },
+        "claude-code-cache-fix.outputEfficiencyReplacement": {
+          "type": "string",
+          "default": "",
+          "description": "Replace Claude Code's '# Output efficiency' system prompt section with custom text. Leave empty to use default. WARNING: This modifies the model's system prompt.",
+          "editPresentation": "multilineText"
+        },
+        "claude-code-cache-fix.imageKeepLast": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 20,
+          "description": "Strip base64 images from tool results older than N user turns (0 = disabled)"
+        }
+      }
+    }
   },
   "extensionDependencies": [],
   "funding": {
