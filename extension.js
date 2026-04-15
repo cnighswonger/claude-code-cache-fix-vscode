@@ -47,14 +47,14 @@ function isClaudeCodeInstalled() {
 function getWrapperPath(context) {
   if (process.platform === 'win32') {
     // Windows needs a native .exe because spawn() doesn't support .js/.bat
-    const exePath = path.join(context.extensionPath, 'claude-vscode-wrapper.exe');
+    const exePath = path.join(context.extensionPath, 'ClaudeCodeCacheFixWrapper.exe');
     if (fs.existsSync(exePath)) {
       return exePath;
     }
     // Fallback: check if user compiled it to the npm package location
     const npmRoot = getNpmRoot();
     if (npmRoot) {
-      const npmExe = path.join(npmRoot, 'claude-code-cache-fix', 'tools', 'claude-vscode-wrapper.exe');
+      const npmExe = path.join(npmRoot, 'claude-code-cache-fix', 'tools', 'ClaudeCodeCacheFixWrapper.exe');
       if (fs.existsSync(npmExe)) return npmExe;
     }
     return null; // No exe available
@@ -111,7 +111,7 @@ async function enable(context) {
     if (action === 'Copy Compile Command') {
       const npmRoot = getNpmRoot();
       const src = npmRoot ? path.join(npmRoot, 'claude-code-cache-fix', 'tools', 'claude-vscode-wrapper.c') : 'claude-vscode-wrapper.c';
-      await vscode.env.clipboard.writeText(`cl "${src}" /Fe:claude-vscode-wrapper.exe`);
+      await vscode.env.clipboard.writeText(`cl "${src}" /Fe:ClaudeCodeCacheFixWrapper.exe`);
       vscode.window.showInformationMessage('Compile command copied. Place the .exe in the extension directory or the cache-fix tools/ directory.');
     } else if (action === 'Open Releases') {
       vscode.env.openExternal(vscode.Uri.parse('https://github.com/cnighswonger/claude-code-cache-fix-vscode/releases/latest'));
