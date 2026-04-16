@@ -14,35 +14,78 @@ const { execSync, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// Find npm global root
-let npmRoot;
-try {
-  npmRoot = execSync('npm root -g', { encoding: 'utf-8' }).trim();
-} catch {
-  // Fallback for common locations
+// Resolve Claude Code CLI path
+// Priority: env override → Volta packages tree → npm root -g → common fallbacks
+function resolveCliPath() {
+  // 1. Explicit env override (escape hatch for any Node manager)
+  if (process.env.CLAUDE_CODE_CACHE_FIX_CLI_JS) {
+    const p = process.env.CLAUDE_CODE_CACHE_FIX_CLI_JS;
+    if (fs.existsSync(p)) return p;
+    process.stderr.write(`claude-code-cache-fix: CLAUDE_CODE_CACHE_FIX_CLI_JS path not found: ${p}\n`);
+  }
+
+  // 2. Volta packages tree (Volta keeps current version here, npm root -g hits stale tree)
+  const localAppData = process.env.LOCALAPPDATA || '';
+  if (localAppData) {
+    const voltaPath = path.join(localAppData, 'Volta', 'tools', 'image', 'packages',
+      '@anthropic-ai', 'claude-code', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+    if (fs.existsSync(voltaPath)) return voltaPath;
+  }
+
+  // 3. npm root -g (standard path for npm, nvm, fnm)
+  try {
+    const npmRoot = execSync('npm root -g', { encoding: 'utf-8' }).trim();
+    const npmPath = path.join(npmRoot, '@anthropic-ai', 'claude-code', 'cli.js');
+    if (fs.existsSync(npmPath)) return npmPath;
+  } catch {}
+
+  // 4. Common fallback locations
   const candidates = [
     path.join(process.env.APPDATA || '', 'npm', 'node_modules'),
     path.join(process.env.HOME || '', '.npm-global', 'lib', 'node_modules'),
     '/usr/local/lib/node_modules',
     '/usr/lib/node_modules',
   ];
-  npmRoot = candidates.find(p => fs.existsSync(path.join(p, 'claude-code-cache-fix')));
-  if (!npmRoot) {
-    process.stderr.write('claude-code-cache-fix: cannot find npm global root. Install with: npm install -g claude-code-cache-fix\n');
-    process.exit(1);
+  for (const dir of candidates) {
+    const p = path.join(dir, '@anthropic-ai', 'claude-code', 'cli.js');
+    if (fs.existsSync(p)) return p;
   }
+
+  return null;
 }
 
-const preloadPath = path.join(npmRoot, 'claude-code-cache-fix', 'preload.mjs');
-const cliPath = path.join(npmRoot, '@anthropic-ai', 'claude-code', 'cli.js');
+// Resolve preload path (same priority minus Volta — cache-fix is always via npm)
+function resolvePreloadPath() {
+  try {
+    const npmRoot = execSync('npm root -g', { encoding: 'utf-8' }).trim();
+    const p = path.join(npmRoot, 'claude-code-cache-fix', 'preload.mjs');
+    if (fs.existsSync(p)) return p;
+  } catch {}
 
-if (!fs.existsSync(preloadPath)) {
-  process.stderr.write(`claude-code-cache-fix: preload not found at ${preloadPath}\nInstall with: npm install -g claude-code-cache-fix\n`);
+  const candidates = [
+    path.join(process.env.APPDATA || '', 'npm', 'node_modules'),
+    path.join(process.env.HOME || '', '.npm-global', 'lib', 'node_modules'),
+    '/usr/local/lib/node_modules',
+    '/usr/lib/node_modules',
+  ];
+  for (const dir of candidates) {
+    const p = path.join(dir, 'claude-code-cache-fix', 'preload.mjs');
+    if (fs.existsSync(p)) return p;
+  }
+
+  return null;
+}
+
+const cliPath = resolveCliPath();
+const preloadPath = resolvePreloadPath();
+
+if (!preloadPath) {
+  process.stderr.write('claude-code-cache-fix: preload.mjs not found.\nInstall with: npm install -g claude-code-cache-fix\n');
   process.exit(1);
 }
 
-if (!fs.existsSync(cliPath)) {
-  process.stderr.write(`claude-code-cache-fix: Claude Code CLI not found at ${cliPath}\nInstall with: npm install -g @anthropic-ai/claude-code\n`);
+if (!cliPath) {
+  process.stderr.write('claude-code-cache-fix: Claude Code cli.js not found.\nInstall with: npm install -g @anthropic-ai/claude-code\nVolta users: volta install @anthropic-ai/claude-code\nOr set CLAUDE_CODE_CACHE_FIX_CLI_JS to the path.\n');
   process.exit(1);
 }
 
