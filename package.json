@@ -1,8 +1,8 @@
 {
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
-  "description": "Automatically loads the claude-code-cache-fix interceptor for Claude Code sessions in VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.",
-  "version": "0.3.0",
+  "description": "Automatically loads the claude-code-cache-fix interceptor (v2.0.0, 15 fixes) for Claude Code sessions in VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.",
+  "version": "0.3.1",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {

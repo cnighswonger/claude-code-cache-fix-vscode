@@ -6,7 +6,7 @@ One-click activation of [claude-code-cache-fix](https://github.com/cnighswonger/
 
 ## What it does
 
-Automatically configures the `claudeCode.claudeProcessWrapper` setting to load the cache-fix interceptor into every Claude Code session started from VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.
+Automatically configures the `claudeCode.claudeProcessWrapper` setting to load the cache-fix interceptor into every Claude Code session started from VS Code. The interceptor (v2.0.0) includes 15 cache-stability fixes that reduce unnecessary cache rebuilds by up to 99.8%. Compatible with CC v2.1.112 and Opus 4.7.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ No native compilation required. Works on Windows, macOS, and Linux.
 
 ## Related
 
-- [claude-code-cache-fix](https://github.com/cnighswonger/claude-code-cache-fix) — The interceptor (108+ stars)
+- [claude-code-cache-fix](https://github.com/cnighswonger/claude-code-cache-fix) — The interceptor (v2.0.0, 15 fixes, 150+ stars)
 - [Blog series](https://veritassuperaitsolutions.com/three-layer-gate-quota-overage/) — Technical analysis
 
 ## License
