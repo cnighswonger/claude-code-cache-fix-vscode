@@ -100,10 +100,29 @@ const configPath = path.join(process.env.HOME || process.env.USERPROFILE || '', 
 try {
   if (fs.existsSync(configPath)) {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    // Core settings
     if (config.debug) process.env.CACHE_FIX_DEBUG = '1';
     if (config.stripGitStatus) process.env.CACHE_FIX_STRIP_GIT_STATUS = '1';
     if (config.outputEfficiencyReplacement) process.env.CACHE_FIX_OUTPUT_EFFICIENCY_REPLACEMENT = config.outputEfficiencyReplacement;
     if (config.imageKeepLast > 0) process.env.CACHE_FIX_IMAGE_KEEP_LAST = String(config.imageKeepLast);
+    // Opt-in features
+    if (config.normalizeIdentity) process.env.CACHE_FIX_NORMALIZE_IDENTITY = '1';
+    if (config.normalizeCwd) process.env.CACHE_FIX_NORMALIZE_CWD = '1';
+    if (config.normalizeSmoosh) process.env.CACHE_FIX_NORMALIZE_SMOOSH = '1';
+    if (config.prefixDiff) process.env.CACHE_FIX_PREFIXDIFF = '1';
+    // Per-extension skip toggles
+    if (config.skipRelocate) process.env.CACHE_FIX_SKIP_RELOCATE = '1';
+    if (config.skipFingerprint) process.env.CACHE_FIX_SKIP_FINGERPRINT = '1';
+    if (config.skipToolSort) process.env.CACHE_FIX_SKIP_TOOL_SORT = '1';
+    if (config.skipTtl) process.env.CACHE_FIX_SKIP_TTL = '1';
+    if (config.skipSmooshSplit) process.env.CACHE_FIX_SKIP_SMOOSH_SPLIT = '1';
+    if (config.skipSessionStartNormalize) process.env.CACHE_FIX_SKIP_SESSION_START_NORMALIZE = '1';
+    if (config.skipContinueTrailerStrip) process.env.CACHE_FIX_SKIP_CONTINUE_TRAILER_STRIP = '1';
+    if (config.skipDeferredToolsRestore) process.env.CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE = '1';
+    if (config.skipReminderStrip) process.env.CACHE_FIX_SKIP_REMINDER_STRIP = '1';
+    if (config.skipCacheControlNormalize) process.env.CACHE_FIX_SKIP_CACHE_CONTROL_NORMALIZE = '1';
+    if (config.skipToolUseInputNormalize) process.env.CACHE_FIX_SKIP_TOOL_USE_INPUT_NORMALIZE = '1';
+    if (config.skipCacheControlSticky) process.env.CACHE_FIX_SKIP_CACHE_CONTROL_STICKY = '1';
   }
 } catch {}
 

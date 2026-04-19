@@ -1,8 +1,8 @@
 {
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
-  "description": "Automatically loads the claude-code-cache-fix interceptor (v2.0.0, 15 fixes) for Claude Code sessions in VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.",
-  "version": "0.3.1",
+  "description": "Automatically loads the claude-code-cache-fix interceptor (v2.0.3, 16 fixes) for Claude Code sessions in VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.",
+  "version": "0.4.0",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {
@@ -67,6 +67,86 @@
           "minimum": 0,
           "maximum": 20,
           "description": "Strip base64 images from tool results older than N user turns (0 = disabled)"
+        },
+        "claude-code-cache-fix.normalizeIdentity": {
+          "type": "boolean",
+          "default": false,
+          "description": "Normalize subagent identity string for cache parity between Agent() and SendMessage() calls (opt-in)"
+        },
+        "claude-code-cache-fix.normalizeCwd": {
+          "type": "boolean",
+          "default": false,
+          "description": "Replace volatile CWD and path references with stable placeholders for cross-worktree cache reuse (opt-in)"
+        },
+        "claude-code-cache-fix.normalizeSmoosh": {
+          "type": "boolean",
+          "default": false,
+          "description": "Normalize dynamic system-reminder values (token usage, budget, output tokens, todo reminder) for cache stability (opt-in)"
+        },
+        "claude-code-cache-fix.prefixDiff": {
+          "type": "boolean",
+          "default": false,
+          "description": "Save prefix snapshots for cross-session diffing to ~/.claude/cache-fix-snapshots/ (diagnostic)"
+        },
+        "claude-code-cache-fix.skipRelocate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the block relocation fix (relocates skills/plugins to messages[0])"
+        },
+        "claude-code-cache-fix.skipFingerprint": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the fingerprint stabilization fix"
+        },
+        "claude-code-cache-fix.skipToolSort": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the tool schema sort fix"
+        },
+        "claude-code-cache-fix.skipTtl": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable TTL injection (1h cache_control markers)"
+        },
+        "claude-code-cache-fix.skipSmooshSplit": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the smoosh/split fix (peels system-reminders from tool results)"
+        },
+        "claude-code-cache-fix.skipSessionStartNormalize": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable session start normalization (startup vs resume consistency)"
+        },
+        "claude-code-cache-fix.skipContinueTrailerStrip": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the --continue trailer strip fix"
+        },
+        "claude-code-cache-fix.skipDeferredToolsRestore": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the deferred tools restore fix (MCP reconnect race)"
+        },
+        "claude-code-cache-fix.skipReminderStrip": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable the bookkeeping reminder strip fix"
+        },
+        "claude-code-cache-fix.skipCacheControlNormalize": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable cache_control marker normalization"
+        },
+        "claude-code-cache-fix.skipToolUseInputNormalize": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable tool_use input field normalization"
+        },
+        "claude-code-cache-fix.skipCacheControlSticky": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable cache_control sticky marker preservation"
         }
       }
     }

@@ -205,6 +205,22 @@ function syncSettings() {
     stripGitStatus: config.get('stripGitStatus', false),
     outputEfficiencyReplacement: config.get('outputEfficiencyReplacement', ''),
     imageKeepLast: config.get('imageKeepLast', 0),
+    normalizeIdentity: config.get('normalizeIdentity', false),
+    normalizeCwd: config.get('normalizeCwd', false),
+    normalizeSmoosh: config.get('normalizeSmoosh', false),
+    prefixDiff: config.get('prefixDiff', false),
+    skipRelocate: config.get('skipRelocate', false),
+    skipFingerprint: config.get('skipFingerprint', false),
+    skipToolSort: config.get('skipToolSort', false),
+    skipTtl: config.get('skipTtl', false),
+    skipSmooshSplit: config.get('skipSmooshSplit', false),
+    skipSessionStartNormalize: config.get('skipSessionStartNormalize', false),
+    skipContinueTrailerStrip: config.get('skipContinueTrailerStrip', false),
+    skipDeferredToolsRestore: config.get('skipDeferredToolsRestore', false),
+    skipReminderStrip: config.get('skipReminderStrip', false),
+    skipCacheControlNormalize: config.get('skipCacheControlNormalize', false),
+    skipToolUseInputNormalize: config.get('skipToolUseInputNormalize', false),
+    skipCacheControlSticky: config.get('skipCacheControlSticky', false),
   };
   try {
     fs.writeFileSync(configPath, JSON.stringify(settings, null, 2));
