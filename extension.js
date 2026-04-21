@@ -47,15 +47,16 @@ function isClaudeCodeInstalled() {
 function getWrapperPath(context) {
   if (process.platform === 'win32') {
     // Windows needs a native .exe because spawn() doesn't support .js/.bat
-    const exePath = path.join(context.extensionPath, 'ClaudeCodeCacheFixWrapper.exe');
-    if (fs.existsSync(exePath)) {
-      return exePath;
-    }
-    // Fallback: check if user compiled it to the npm package location
+    // Check npm global first — stable across extension updates
     const npmRoot = getNpmRoot();
     if (npmRoot) {
       const npmExe = path.join(npmRoot, 'claude-code-cache-fix', 'tools', 'ClaudeCodeCacheFixWrapper.exe');
       if (fs.existsSync(npmExe)) return npmExe;
+    }
+    // Fallback: bundled in extension directory (changes on every update)
+    const exePath = path.join(context.extensionPath, 'ClaudeCodeCacheFixWrapper.exe');
+    if (fs.existsSync(exePath)) {
+      return exePath;
     }
     return null; // No exe available
   }
