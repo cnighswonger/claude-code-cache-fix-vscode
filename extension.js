@@ -4,7 +4,9 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 
 const WRAPPER_SETTING = 'claudeCode.claudeProcessWrapper';
+const ENV_SETTING = 'claudeCode.environmentVariables';
 const CONFIG_KEY = 'claude-code-cache-fix';
+const DEFAULT_PROXY_URL = 'http://127.0.0.1:9801';
 
 /**
  * Get npm global root, cached.
@@ -182,15 +184,106 @@ async function showStatus(context) {
     }
   } catch {}
 
+  const proxyEnabled = isProxyEnabled();
+  const proxyPath = getProxyServerPath();
+
   const lines = [
     `Platform: ${process.platform}`,
     `Interceptor installed: ${interceptorInstalled ? 'Yes' : 'No'}`,
     `Claude Code (npm) installed: ${ccInstalled ? 'Yes' : 'No'}`,
-    `Wrapper enabled: ${enabled ? 'Yes' : 'No'}`,
-    `Wrapper path: ${wrapperPath || 'Not available (Windows .exe required)'}`,
+    `Mode: ${proxyEnabled ? 'Proxy' : enabled ? 'Preload (wrapper)' : 'Disabled'}`,
+    proxyEnabled ? `Proxy URL: ${DEFAULT_PROXY_URL}` : `Wrapper path: ${wrapperPath || 'Not available'}`,
+    `Proxy server: ${proxyPath ? 'Available (v3.0.1+)' : 'Not found (update npm package)'}`,
   ];
 
   vscode.window.showInformationMessage('Cache Fix Status:\n' + lines.join('\n') + statsInfo);
+}
+
+/**
+ * Check if proxy mode is currently enabled.
+ */
+function isProxyEnabled() {
+  const config = vscode.workspace.getConfiguration();
+  const envVars = config.get(ENV_SETTING);
+  return envVars && envVars.ANTHROPIC_BASE_URL && envVars.ANTHROPIC_BASE_URL.includes('127.0.0.1');
+}
+
+/**
+ * Get the path to the proxy server script.
+ */
+function getProxyServerPath() {
+  const npmRoot = getNpmRoot();
+  if (!npmRoot) return null;
+  const proxyPath = path.join(npmRoot, 'claude-code-cache-fix', 'proxy', 'server.mjs');
+  if (fs.existsSync(proxyPath)) return proxyPath;
+  return null;
+}
+
+/**
+ * Enable proxy mode by setting ANTHROPIC_BASE_URL in Claude Code env vars.
+ */
+async function enableProxy() {
+  if (!isInterceptorInstalled()) {
+    const action = await vscode.window.showWarningMessage(
+      'claude-code-cache-fix npm package not found (v3.0.1+ required for proxy). Install with: npm install -g claude-code-cache-fix',
+      'Copy Install Command'
+    );
+    if (action === 'Copy Install Command') {
+      await vscode.env.clipboard.writeText('npm install -g claude-code-cache-fix');
+    }
+    return;
+  }
+
+  const proxyPath = getProxyServerPath();
+  if (!proxyPath) {
+    vscode.window.showWarningMessage(
+      'Proxy server not found. Update to v3.0.1+: npm install -g claude-code-cache-fix@latest'
+    );
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration();
+  const envVars = config.get(ENV_SETTING) || {};
+
+  if (envVars.ANTHROPIC_BASE_URL && !envVars.ANTHROPIC_BASE_URL.includes('127.0.0.1')) {
+    const choice = await vscode.window.showWarningMessage(
+      `ANTHROPIC_BASE_URL is already set to: ${envVars.ANTHROPIC_BASE_URL}. Replace with proxy?`,
+      'Replace', 'Cancel'
+    );
+    if (choice !== 'Replace') return;
+  }
+
+  envVars.ANTHROPIC_BASE_URL = DEFAULT_PROXY_URL;
+  await config.update(ENV_SETTING, envVars, vscode.ConfigurationTarget.Global);
+
+  const action = await vscode.window.showInformationMessage(
+    `Proxy mode enabled (${DEFAULT_PROXY_URL}). Start the proxy server, then restart any active Claude Code session.`,
+    'Copy Start Command'
+  );
+  if (action === 'Copy Start Command') {
+    await vscode.env.clipboard.writeText(`node "${proxyPath}" &`);
+    vscode.window.showInformationMessage('Proxy start command copied to clipboard.');
+  }
+}
+
+/**
+ * Disable proxy mode by removing ANTHROPIC_BASE_URL.
+ */
+async function disableProxy() {
+  const config = vscode.workspace.getConfiguration();
+  const envVars = config.get(ENV_SETTING) || {};
+
+  if (!envVars.ANTHROPIC_BASE_URL) {
+    vscode.window.showInformationMessage('Proxy mode is not currently enabled.');
+    return;
+  }
+
+  delete envVars.ANTHROPIC_BASE_URL;
+  const hasOtherVars = Object.keys(envVars).length > 0;
+  await config.update(ENV_SETTING, hasOtherVars ? envVars : undefined, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(
+    'Proxy mode disabled. Restart any active Claude Code session to apply.'
+  );
 }
 
 /**
@@ -241,7 +334,9 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand(`${CONFIG_KEY}.enable`, () => enable(context)),
     vscode.commands.registerCommand(`${CONFIG_KEY}.disable`, () => disable()),
-    vscode.commands.registerCommand(`${CONFIG_KEY}.status`, () => showStatus(context))
+    vscode.commands.registerCommand(`${CONFIG_KEY}.status`, () => showStatus(context)),
+    vscode.commands.registerCommand(`${CONFIG_KEY}.enableProxy`, () => enableProxy()),
+    vscode.commands.registerCommand(`${CONFIG_KEY}.disableProxy`, () => disableProxy())
   );
 
   // Auto-enable on first install if interceptor is available

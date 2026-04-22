@@ -1,8 +1,8 @@
 {
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
-  "description": "Automatically loads the claude-code-cache-fix interceptor (v2.0.3, 16 fixes) for Claude Code sessions in VS Code. Fixes prompt cache bugs that cause up to 20x cost increase.",
-  "version": "0.4.1",
+  "description": "Cache optimization for Claude Code in VS Code. Proxy mode (v3.0+) or preload interceptor. Fixes prompt cache bugs that cause excessive quota burn.",
+  "version": "0.5.0",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {
@@ -40,6 +40,14 @@
       {
         "command": "claude-code-cache-fix.status",
         "title": "Claude Code Cache Fix: Show Status"
+      },
+      {
+        "command": "claude-code-cache-fix.enableProxy",
+        "title": "Claude Code Cache Fix: Enable Proxy Mode (recommended for CC v2.1.113+)"
+      },
+      {
+        "command": "claude-code-cache-fix.disableProxy",
+        "title": "Claude Code Cache Fix: Disable Proxy Mode"
       }
     ],
     "configuration": {
