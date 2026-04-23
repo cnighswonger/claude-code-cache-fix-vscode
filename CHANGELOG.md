@@ -3,6 +3,26 @@
 All notable changes to the Claude Code Cache Fix VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.1] — 2026-04-24
+
+Settings UX overhaul — no behavior change. Every setting now has a real markdown description citing the upstream [extension-impact-guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md) (measured impact, when to disable, deep link to the guide's anchor for that fix). Settings are grouped into five labeled sections in the VS Code Settings UI so the 28 toggles don't flatten into one alphabetized wall.
+
+### Changed
+- `contributes.configuration` is now an array of five sections with `title` and `order`:
+  1. **Activation** (4 settings) — `autoStartProxy`, `autoInstallInterceptor`, `debug`, `prefixDiff`.
+  2. **Corporate environments (proxies, custom CAs)** (6 settings) — `httpsProxy`, `noProxy`, `caFile`, `rejectUnauthorized`, `autoExportCerts`, `certSearchPatterns`.
+  3. **Proxy-mode fixes (CC v2.1.113+)** (5 settings) — `skipFingerprint`, `skipToolSort`, `skipSessionStartNormalize`, `skipCacheControlNormalize`, `skipTtl`.
+  4. **Preload-mode fixes (CC ≤v2.1.112)** (10 settings) — `skipRelocate` and friends, plus `normalize*` opt-ins.
+  5. **Prompt & image rewrites** (3 settings) — `imageKeepLast`, `stripGitStatus`, `outputEfficiencyReplacement`.
+- Every `description` is now a `markdownDescription` with a four-part template: *what the fix does / effect when the setting is enabled / measured cost of skipping / deep link to the guide*. Real numbers where available (e.g. fingerprint: 81% of calls affected in a 536-call validation, cache hit rate 95-99% vs 60-80%).
+- Preload-only settings carry a leading `> ⚠️ **Preload-mode only** — no effect on CC v2.1.113+` callout so users on recent CC don't chase settings that do nothing for them.
+- `stripGitStatus` description now points users at the native `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` flag (same effect, no interceptor needed, works on Bun binary).
+- Within each section, settings carry an `order` so layout is stable rather than alphabetized.
+
+### Not changed
+- Setting **keys** are unchanged (`skipFingerprint` stays `skipFingerprint`, etc.) — the polarity-confusion of "set true to disable the fix" is called out explicitly in each description. A proper rename (e.g. `fingerprintFixEnabled: true`) would require migration and is deferred to a future minor release.
+- Runtime behavior is unchanged — `extension.js` is unchanged. Existing `settings.json` entries continue to work identically.
+
 ## [0.6.0] — 2026-04-23
 
 Turns "install VSIX and follow a 3-step README" into "install VSIX, done." Fixes two high-severity bugs from 0.5.0 and adds corporate-environment support (proxy / custom CA / Windows cert auto-export). Self-heals across extension updates. Pairs with `claude-code-cache-fix@>=3.0.3` (whose upstream agent wiring landed via [cnighswonger/claude-code-cache-fix#54](https://github.com/cnighswonger/claude-code-cache-fix/pull/54)).
