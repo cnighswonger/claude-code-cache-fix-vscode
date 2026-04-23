@@ -2,7 +2,7 @@
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
   "description": "Cache optimization for Claude Code in VS Code. Proxy mode (v3.0+) or preload interceptor. Fixes prompt cache bugs that cause excessive quota burn.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {
@@ -48,11 +48,64 @@
       {
         "command": "claude-code-cache-fix.disableProxy",
         "title": "Claude Code Cache Fix: Disable Proxy Mode"
+      },
+      {
+        "command": "claude-code-cache-fix.openProxyLog",
+        "title": "Claude Code Cache Fix: Open Proxy Request Log"
+      },
+      {
+        "command": "claude-code-cache-fix.testProxyConnection",
+        "title": "Claude Code Cache Fix: Test Connection to Anthropic API"
+      },
+      {
+        "command": "claude-code-cache-fix.exportCorporateCerts",
+        "title": "Claude Code Cache Fix: Export Windows Corporate Certificates"
       }
     ],
     "configuration": {
       "title": "Claude Code Cache Fix",
       "properties": {
+        "claude-code-cache-fix.autoStartProxy": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically enable proxy mode and start the local proxy server when the extension activates. Turn off to manage it manually via the command palette."
+        },
+        "claude-code-cache-fix.autoInstallInterceptor": {
+          "type": "boolean",
+          "default": true,
+          "description": "If the claude-code-cache-fix npm package is missing on activate, install it automatically. Uses `volta install` when npm is Volta-managed, otherwise `npm install -g`. Disable to manage installation yourself."
+        },
+        "claude-code-cache-fix.httpsProxy": {
+          "type": "string",
+          "default": "",
+          "description": "Corporate HTTP(S) proxy URL for upstream forwarding (e.g., http://proxy.corp.example:8080). Leave empty to use the system HTTPS_PROXY/HTTP_PROXY environment variables. Required behind Zscaler/Netskope/Forcepoint/Bluecoat."
+        },
+        "claude-code-cache-fix.noProxy": {
+          "type": "string",
+          "default": "localhost,127.0.0.1,::1,.local",
+          "description": "Comma-separated host list to bypass the corporate proxy. Supports `.suffix.example` and `*`."
+        },
+        "claude-code-cache-fix.caFile": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a PEM file with extra CA certificates (for SSL-inspecting proxies). Alternative to setting NODE_EXTRA_CA_CERTS system-wide. Leave empty to use the system-default trust store."
+        },
+        "claude-code-cache-fix.rejectUnauthorized": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify TLS certificates on upstream forwarding. **Insecure escape hatch only.** Disable solely as a last resort while waiting for IT to provide the corporate CA bundle."
+        },
+        "claude-code-cache-fix.autoExportCerts": {
+          "type": "boolean",
+          "default": false,
+          "description": "(Windows only) On activate, export matching certificates from the Windows certificate store to `~/.claude/cache-fix-corp-ca-bundle.pem` and use them as the CA file. Useful for Zscaler/Netskope environments where the CA chain lives in the Windows trust store."
+        },
+        "claude-code-cache-fix.certSearchPatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["*Zscaler*", "*Netskope*", "*Forcepoint*"],
+          "description": "Subject patterns to match when auto-exporting certificates from the Windows store."
+        },
         "claude-code-cache-fix.debug": {
           "type": "boolean",
           "default": false,

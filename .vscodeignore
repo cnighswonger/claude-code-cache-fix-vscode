@@ -1,3 +1,13 @@
 .git
 .gitignore
 *.vsix
+
+# fork-only working docs and reference copies — not part of the published extension
+CHANGELOG.md
+CURRENT_BODY.md
+ISSUE_BODY.md
+UPSTREAM_ISSUE.md
+PR_BODY.md
+TUTORIAL_proxy_and_tls.md
+fix.patch
+claude-code-proxy-config/**
