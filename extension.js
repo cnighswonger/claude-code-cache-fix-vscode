@@ -880,8 +880,27 @@ function activate(context) {
   });
 }
 
-function deactivate() {
+async function deactivate() {
   stopProxyServer();
+  // Remove the ANTHROPIC_BASE_URL entry we wrote on activate, so Claude Code
+  // falls back to direct upstream when this extension is disabled/uninstalled.
+  // Otherwise the persisted setting keeps pointing at a dead 127.0.0.1:9801
+  // and every Claude Code request fails with `Connection error` until the
+  // extension re-activates.
+  // The filter is conservative — only removes entries whose value contains
+  // 127.0.0.1, so a user-set value (corp proxy, mitmproxy, etc.) is left alone.
+  try {
+    const config = vscode.workspace.getConfiguration();
+    const raw = config.get(ENV_SETTING);
+    let entries = Array.isArray(raw) ? raw.slice()
+      : raw && typeof raw === 'object' ? Object.entries(raw).map(([name, value]) => ({ name, value }))
+      : [];
+    const filtered = entries.filter((e) =>
+      !(e && e.name === 'ANTHROPIC_BASE_URL' && typeof e.value === 'string' && e.value.includes('127.0.0.1')));
+    if (filtered.length !== entries.length) {
+      await config.update(ENV_SETTING, filtered.length > 0 ? filtered : undefined, vscode.ConfigurationTarget.Global);
+    }
+  } catch {}
   if (proxyChannel) {
     try { proxyChannel.dispose(); } catch {}
     proxyChannel = null;

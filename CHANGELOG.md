@@ -3,6 +3,16 @@
 All notable changes to the Claude Code Cache Fix VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] — 2026-04-25
+
+Bugfix release.
+
+### Fixed
+- **`deactivate()` now clears the `ANTHROPIC_BASE_URL` entry it wrote on activate.** When the extension was disabled or uninstalled in 0.6.x and 0.7.0, the proxy child process stopped but the `claudeCode.environmentVariables` setting kept pointing at the now-dead `http://127.0.0.1:9801`. Claude Code in VS Code would then fail every request with `undefined Connection error` (terminal `claude` was unaffected — it doesn't read this VS-Code-only setting). Cleanup is conservative — only removes entries whose value contains `127.0.0.1`, so user-set values (corp proxy, mitmproxy, etc.) are left alone.
+
+### Known tradeoff
+- `deactivate()` also fires on VS Code window close, so the entry is removed on shutdown and re-added on next activate — minor `settings.json` churn for the user. The alternative (no cleanup) is the connection-error bug above, which is worse.
+
 ## [0.7.0] — 2026-04-25
 
 Tracks upstream [`claude-code-cache-fix@3.1.0`](https://github.com/cnighswonger/claude-code-cache-fix/releases/tag/v3.1.0) and drops preload-mode wrapper support entirely. Proxy mode is the only mode now — preload didn't work on the Bun-binary CC (v2.1.113+) anyway, and shipping the 67 MB Windows wrapper .exe alongside dead code was costing every user on every download.
