@@ -1,0 +1,8 @@
+# build artifacts (release assets, not source)
+*.vsix
+
+# local Claude Code session state
+.claude/
+
+# scratch / temp directories
+.ps-temp/

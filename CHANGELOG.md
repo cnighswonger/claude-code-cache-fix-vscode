@@ -3,6 +3,181 @@
 All notable changes to the Claude Code Cache Fix VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.3] — 2026-04-25
+
+### Changed — settings section titles shortened
+
+The three Settings-UI section titles (`contributes.configuration[].title`) were "Claude Code Cache Fix: Activation" etc. — but VS Code already groups them under "Claude Code Cache Fix" as the parent extension, so the prefix was duplicated and pushed the actual section name off-screen on narrow Settings panels. Renamed to:
+
+- `CCC: Activation`
+- `CCC: Corporate environments (proxies, custom CAs)`
+- `CCC: Pipeline extensions (opt-out toggles)`
+
+No behavior change. Setting keys (`claude-code-cache-fix.*`) are unchanged.
+
+### Fixed — auto-update on every activate
+
+Until 0.7.2, the auto-install logic only triggered when the npm package was *missing*. The `@latest` in `volta install claude-code-cache-fix@latest` was moot if we never ran the command. Result: a user who installed `claude-code-cache-fix@3.1.0` via 0.7.0 would still be on 3.1.0 weeks later, even after upstream shipped 3.1.1, 3.1.2, etc.
+
+v0.7.3 adds `maybeAutoUpdate()`. On every activate (when `autoInstallInterceptor` is on, default `true`):
+
+1. Read installed version from the package's `package.json`.
+2. Hit `https://registry.npmjs.org/claude-code-cache-fix/latest` (~200ms direct HTTPS, no `npm` spawn). Honors corporate `httpsProxy` / `caFile` / `rejectUnauthorized` settings via the existing `hpagent` agent.
+3. If installed < latest, run `volta install claude-code-cache-fix@latest` (or `npm install -g`).
+
+### Self-lock guard
+
+Volta and npm both `rm -rf` the package directory before installing. If our proxy is running out of that directory, the rm fails mid-way and leaves the install half-removed. To prevent this, `maybeAutoUpdate()` probes port 9801 first — if anything is listening (could be a proxy from another VS Code window, or a zombie from a crashed prior session), it skips the update for this activate cycle and logs a notice. Next activate retries.
+
+The check runs **before** we spawn our own proxy, so there's no self-lock from the same extension host.
+
+### Silent on failure
+
+Network down, corp proxy blocking npm, registry returning unexpected JSON — all silent (logged to the proxy output channel, no popup). Installed version keeps working. Update is best-effort, never blocking.
+
+### What you'll see in the proxy output channel
+
+```
+[2026-04-25T...] Update check: installed 3.1.0 is up to date (latest 3.1.0).
+```
+
+or, when an update lands:
+
+```
+[2026-04-25T...] Update available: 3.1.0 → 3.1.1. Installing.
+[2026-04-25T...] Cache Fix: updating 3.1.0 → 3.1.1 via volta…
+[2026-04-25T...] Updated to 3.1.1.
+```
+
+or, when locked:
+
+```
+[2026-04-25T...] Update check skipped: port 9801 is already in use, can't safely upgrade. Will retry next activate.
+```
+
+### Note on the lock condition
+
+If you have multiple VS Code windows open simultaneously, only the first one to activate wins the update; the others see the proxy already on 9801 and skip. They pick up the upgraded package on their next activate (window reload or VS Code restart) once the holder releases the port.
+
+If you ever land in a half-uninstalled state (e.g. you `Ctrl+C`'d an in-flight `volta install`), run `volta install claude-code-cache-fix@latest` from a terminal manually — it'll clean up and reinstall.
+
+## [0.7.2] — 2026-04-25
+
+Real fix for the "stale `ANTHROPIC_BASE_URL` after uninstall" bug. The 0.7.1 attempt — clean up the persisted setting in `deactivate()` — turned out to be unreliable: VS Code unloads the extension before the async settings write commits, so the entry stayed in `settings.json` and Claude Code in VS Code kept failing with `undefined Connection error` until the user manually edited their settings.
+
+### Changed — `process.env` instead of persisted user setting
+
+Instead of writing `ANTHROPIC_BASE_URL` to `claudeCode.environmentVariables` (a persisted setting in `~/.../User/settings.json`), v0.7.2 sets `process.env.ANTHROPIC_BASE_URL` directly in the VS Code extension host. All extensions in a VS Code window share one Node.js process and therefore one `process.env`; Claude Code's spawn explicitly merges `process.env` with `claudeCode.environmentVariables` when launching `claude`:
+
+```js
+// Verified in anthropic.claude-code 2.1.120, the function that builds the spawn env:
+function OV(V) {
+  let K = _14(e6("environmentVariables")),
+      B = { ...process.env };                // ← inherits parent env
+  if (V) B.PATH = V;
+  B.MCP_CONNECTION_NONBLOCKING = "true";
+  for (let x of K) if (x.name) B[x.name] = x.value || "";
+  return B.CLAUDE_CODE_ENTRYPOINT = "claude-vscode", B;
+}
+```
+
+So setting `process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9801'` in our `activate()` is enough — Claude Code's `claude` subprocess inherits it. Nothing is written to user settings.
+
+### Why this is reliable on disable/uninstall
+
+`process.env` is in-memory state of the extension host. Modification is **synchronous**. `deactivate()` does a synchronous `delete process.env.ANTHROPIC_BASE_URL` (or restores the prior value if there was one) before VS Code unloads us — no async race with the settings service. On VS Code restart with our extension uninstalled, the host starts fresh: nothing for Claude Code to inherit, traffic goes direct to `api.anthropic.com`. The user's `settings.json` is never touched.
+
+### Added — automatic legacy cleanup on activate
+
+For users upgrading from 0.6.x / 0.7.0 / 0.7.1 who already have a stale `ANTHROPIC_BASE_URL` entry in `claudeCode.environmentVariables`: every activate now runs `cleanupLegacyEnvSetting()`, which removes any entry whose value contains `127.0.0.1`. User-set values (corp proxy, AWS Bedrock router, mitmproxy) are left alone.
+
+### Preserves user-set values
+
+If `process.env.ANTHROPIC_BASE_URL` is already set to a non-proxy URL when activate runs (e.g. user has it exported in their shell, or another tool sets it), we save it before overriding and restore it on deactivate. The `Enable Proxy Mode` command prompts before clobbering an explicit non-proxy value.
+
+### Removed
+- All writes to `claudeCode.environmentVariables` from this extension. The setting is read-only from our perspective now (only inspected by `cleanupLegacyEnvSetting`).
+- `getBaseUrlFromEnvSetting()` (no longer needed; `isProxyEnabled()` checks `process.env` directly).
+
+### Tradeoffs vs. 0.7.1
+- **Per-window scope**: process.env modification only affects the current VS Code window. Each window's extension host is independent. This is correct — proxy is per-window anyway (one proxy child per window).
+- **No persistence across VS Code restart**: `autoStartProxy` (default `true`) re-applies on every activate, so no UX impact. Manual `Enable Proxy Mode` is also session-scoped, but `autoStartProxy` covers the common case.
+
+## [0.7.1] — 2026-04-25
+
+Bugfix release.
+
+### Fixed
+- **`deactivate()` now clears the `ANTHROPIC_BASE_URL` entry it wrote on activate.** When the extension was disabled or uninstalled in 0.6.x and 0.7.0, the proxy child process stopped but the `claudeCode.environmentVariables` setting kept pointing at the now-dead `http://127.0.0.1:9801`. Claude Code in VS Code would then fail every request with `undefined Connection error` (terminal `claude` was unaffected — it doesn't read this VS-Code-only setting). Cleanup is conservative — only removes entries whose value contains `127.0.0.1`, so user-set values (corp proxy, mitmproxy, etc.) are left alone.
+
+### Known tradeoff
+- `deactivate()` also fires on VS Code window close, so the entry is removed on shutdown and re-added on next activate — minor `settings.json` churn for the user. The alternative (no cleanup) is the connection-error bug above, which is worse.
+
+## [0.7.0] — 2026-04-25
+
+Tracks upstream [`claude-code-cache-fix@3.1.0`](https://github.com/cnighswonger/claude-code-cache-fix/releases/tag/v3.1.0) and drops preload-mode wrapper support entirely. Proxy mode is the only mode now — preload didn't work on the Bun-binary CC (v2.1.113+) anyway, and shipping the 67 MB Windows wrapper .exe alongside dead code was costing every user on every download.
+
+### Removed — preload mode and wrapper
+
+- **Deleted `ClaudeCodeCacheFixWrapper.exe` (67 MB) and `wrapper.js`.** VSIX is now ~30 KB instead of ~30 MB.
+- **Removed commands `Claude Code Cache Fix: Enable` / `Disable`** (preload). The proxy commands `Enable Proxy Mode` / `Disable Proxy Mode` remain.
+- **Removed 13 preload-only settings:** `skipRelocate`, `skipContinueTrailerStrip`, `skipReminderStrip`, `skipCacheControlSticky`, `normalizeIdentity`, `normalizeCwd`, `normalizeSmoosh`, `imageKeepLast`, `stripGitStatus`, `outputEfficiencyReplacement`, `debug`, plus the preload variants of `skipSmooshSplit` / `skipDeferredToolsRestore` / `skipToolUseInputNormalize` (the names are reused for proxy-mode opt-outs — see below).
+- **Removed extension code:** `WRAPPER_SETTING` write paths, `getWrapperPath`, `ensureStableWrapperCopy`, `getStableBinDir`, `enable`/`disable`/`isEnabled`, `syncSettings` (it wrote `~/.claude/cache-fix-vscode-config.json` for the wrapper to read; nothing reads it anymore).
+- **On activate, leftover `claudeCode.claudeProcessWrapper` settings written by 0.6.x are cleared** if the path looks like ours (matches `.vscode/extensions/...claude-code-cache-fix...` or `~/.claude/cache-fix-bin/`). Third-party wrappers are not touched.
+
+### Added — sync to v3.1.0 upstream defaults
+
+Three previously dormant proxy extensions are now enabled by default in v3.1.0; the override file we write at `~/.claude/cache-fix-proxy-extensions.json` mirrors that. Real-world testing of these together recovered cache hit rate from 5.9% to 99.9% in ~2 calls.
+
+- **`smoosh-split`** (order 320) — peels `system-reminder` blocks out of tool results.
+- **`content-strip`** (order 330) — removes per-turn bookkeeping text.
+- **`tool-input-normalize`** (order 340) — cache-stable JSON serialization for `tool_use` inputs.
+
+Plus two env-var-controlled extensions, both wired through new VS Code settings:
+
+- **`prefix-diff`** — opt-in via the existing `prefixDiff` setting (now actually wires `CACHE_FIX_PREFIXDIFF=1` into the proxy spawn env; in 0.6.x it only fed the now-deleted preload wrapper). Snapshots request prefixes to `~/.claude/cache-fix-snapshots/` for diffing.
+- **`deferred-tools-restore`** — default-on in v3.1.0; opt-out via `skipDeferredToolsRestore` (sets `CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE=1`). Addresses MCP reconnect race conditions that previously shrank tool attachments and caused massive cache misses.
+
+### Changed — settings now actually wire to the proxy
+
+In 0.6.x, the proxy-mode `skip*` settings only updated the now-deleted preload wrapper config — they had **no effect on the proxy**. This is fixed: every `skip*` toggle now flips the corresponding extension's `enabled` flag in the override file we write before each proxy spawn, and changes restart the running proxy automatically.
+
+- `skipFingerprint` → `fingerprint-strip.enabled=false`
+- `skipToolSort` → `sort-stabilization.enabled=false`
+- `skipSessionStartNormalize` → `fresh-session-sort.enabled=false`
+- `skipSmooshSplit` → `smoosh-split.enabled=false` (new wiring)
+- `skipContentStrip` → `content-strip.enabled=false` (new setting + wiring)
+- `skipToolInputNormalize` → `tool-input-normalize.enabled=false` (renamed from `skipToolUseInputNormalize`, new wiring)
+- `skipCacheControlNormalize` → `cache-control-normalize.enabled=false`
+- `skipTtl` → `ttl-management.enabled=false`
+- `skipDeferredToolsRestore` → `CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE=1` (env var, new wiring)
+- `prefixDiff` → `CACHE_FIX_PREFIXDIFF=1` (env var, new wiring)
+
+The settings panel collapsed from 5 sections / 28 toggles to 3 sections / 17 toggles — Activation (3), Corporate environments (6), Pipeline extensions (8). Less surface, but every remaining knob actually does something.
+
+### Migration
+
+Settings keys reused with new wiring:
+- `claude-code-cache-fix.skipSmooshSplit` — was preload-only, now flips the proxy `smoosh-split` extension.
+- `claude-code-cache-fix.skipDeferredToolsRestore` — was preload-only, now sets the proxy env var.
+- `claude-code-cache-fix.prefixDiff` — was preload-only, now sets the proxy env var.
+
+Setting renamed:
+- `claude-code-cache-fix.skipToolUseInputNormalize` → `claude-code-cache-fix.skipToolInputNormalize`. If you had the old key in your settings.json, copy the value to the new key — VS Code will mark the old one as "Unknown configuration setting".
+
+Settings deleted (no replacement; were preload-only and have no proxy equivalent yet upstream):
+- `skipRelocate`, `skipContinueTrailerStrip`, `skipReminderStrip`, `skipCacheControlSticky`
+- `normalizeIdentity` (proxy has `identity-normalization` always on at order 300 — same effect, no toggle), `normalizeCwd`, `normalizeSmoosh`
+- `imageKeepLast`, `outputEfficiencyReplacement`
+- `stripGitStatus` — use the native `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` environment variable instead (same effect, works on Bun-binary CC).
+- `debug` — was the preload-mode debug log toggle. The proxy has its own NDJSON telemetry at `~/.claude/cache-fix-proxy-log.ndjson` (`Open Proxy Request Log` command), always on.
+
+### Compatibility
+
+- Requires `claude-code-cache-fix@>=3.0.1` for proxy mode at minimum; `>=3.1.0` for the new default-on extensions and env-var-controlled features.
+- `httpsProxy` / `noProxy` end-to-end honored only on `>=3.0.3`.
+- VSIX no longer contains the Windows wrapper .exe — install size shrinks by ~30 MB.
+
 ## [0.6.1] — 2026-04-24
 
 Settings UX overhaul — no behavior change. Every setting now has a real markdown description citing the upstream [extension-impact-guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md) (measured impact, when to disable, deep link to the guide's anchor for that fix). Settings are grouped into five labeled sections in the VS Code Settings UI so the 28 toggles don't flatten into one alphabetized wall.
