@@ -1,8 +1,8 @@
 {
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
-  "description": "Cache optimization for Claude Code in VS Code. Proxy mode (v3.0+) or preload interceptor. Fixes prompt cache bugs that cause excessive quota burn.",
-  "version": "0.6.1",
+  "description": "Auto-starts the claude-code-cache-fix proxy for Claude Code in VS Code. Fixes prompt-cache instability that causes excessive quota burn. Tracks upstream npm v3.1.0.",
+  "version": "0.7.0",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {
@@ -30,20 +30,12 @@
   "contributes": {
     "commands": [
       {
-        "command": "claude-code-cache-fix.enable",
-        "title": "Claude Code Cache Fix: Enable"
-      },
-      {
-        "command": "claude-code-cache-fix.disable",
-        "title": "Claude Code Cache Fix: Disable"
-      },
-      {
         "command": "claude-code-cache-fix.status",
         "title": "Claude Code Cache Fix: Show Status"
       },
       {
         "command": "claude-code-cache-fix.enableProxy",
-        "title": "Claude Code Cache Fix: Enable Proxy Mode (recommended for CC v2.1.113+)"
+        "title": "Claude Code Cache Fix: Enable Proxy Mode"
       },
       {
         "command": "claude-code-cache-fix.disableProxy",
@@ -71,25 +63,19 @@
             "type": "boolean",
             "default": true,
             "order": 1,
-            "markdownDescription": "**When `true` (default):** on activate, the extension silently enables proxy mode — sets `ANTHROPIC_BASE_URL` in global `claudeCode.environmentVariables` and spawns the local proxy server as a managed child process. No command-palette step needed.\n\n**When `false`:** nothing auto-starts. Use the command palette (`Claude Code Cache Fix: Enable Proxy Mode`) to turn it on manually.\n\nOn CC v2.1.113+ (Bun binary) proxy mode is the **only** way to get cache fixes — the preload interceptor doesn't work on Bun. Keep this on unless you have a specific reason to manage it yourself."
+            "markdownDescription": "**When `true` (default):** on activate, the extension silently enables proxy mode — sets `ANTHROPIC_BASE_URL` in global `claudeCode.environmentVariables` and spawns the local proxy server as a managed child process. No command-palette step needed.\n\n**When `false`:** nothing auto-starts. Use the command palette (`Claude Code Cache Fix: Enable Proxy Mode`) to turn it on manually.\n\nProxy mode is the only supported mode in v0.7.0+ — preload-mode wrapper support was dropped because it doesn't work on the Bun-binary CC (v2.1.113+) anyway."
           },
           "claude-code-cache-fix.autoInstallInterceptor": {
             "type": "boolean",
             "default": true,
             "order": 2,
-            "markdownDescription": "**When `true` (default):** if the `claude-code-cache-fix` npm package is missing on activate, the extension installs it using whichever package manager owns the Node toolchain — `volta install` when `npm` resolves to a Volta shim, otherwise `npm install -g`. Progress surfaced via a VS Code notification.\n\n**When `false`:** a warning popup appears asking you to run the install yourself.\n\nThe extension needs the npm package for the proxy server and the preload interceptor; without it, neither mode works."
-          },
-          "claude-code-cache-fix.debug": {
-            "type": "boolean",
-            "default": false,
-            "order": 10,
-            "markdownDescription": "**Diagnostic.** Enables verbose debug logging from the preload interceptor to `~/.claude/cache-fix-debug.log`. Includes per-call dumps of prefix hashes, applied/skipped fix counts, and breakpoint traces.\n\nThe proxy has its own telemetry in `~/.claude/cache-fix-proxy-log.ndjson` (NDJSON, one line per `/v1/messages` call) — open it via `Claude Code Cache Fix: Open Proxy Request Log`.\n\nLeave off for normal use; turn on when reproducing a bug."
+            "markdownDescription": "**When `true` (default):** if the `claude-code-cache-fix` npm package is missing on activate, the extension installs it using whichever package manager owns the Node toolchain — `volta install` when `npm` resolves to a Volta shim, otherwise `npm install -g`. Progress surfaced via a VS Code notification.\n\n**When `false`:** a warning popup appears asking you to run the install yourself.\n\nThe extension needs the npm package for the proxy server; without it, nothing works."
           },
           "claude-code-cache-fix.prefixDiff": {
             "type": "boolean",
             "default": false,
-            "order": 11,
-            "markdownDescription": "**Diagnostic.** Saves system-prompt prefix snapshots to `~/.claude/cache-fix-snapshots/` on every call, so you can `diff` across sessions to find what's changing and busting the cache.\n\nLarge output — can fill gigabytes over a long session. Leave off unless actively investigating a cache-instability report."
+            "order": 10,
+            "markdownDescription": "**Diagnostic.** Activates the v3.1.0 `prefix-diff` proxy extension by setting `CACHE_FIX_PREFIXDIFF=1` in the proxy spawn env. Snapshots request prefixes to `~/.claude/cache-fix-snapshots/` so you can `diff` across turns and find what's busting the cache. Does not mutate requests.\n\nLarge output — can fill gigabytes over a long session. Leave off unless actively investigating a cache-instability report."
           }
         }
       },
@@ -137,131 +123,62 @@
         }
       },
       {
-        "title": "Claude Code Cache Fix: Proxy-mode fixes (CC v2.1.113+)",
+        "title": "Claude Code Cache Fix: Pipeline extensions (opt-out toggles)",
         "order": 3,
         "properties": {
           "claude-code-cache-fix.skipFingerprint": {
             "type": "boolean",
             "default": false,
             "order": 1,
-            "markdownDescription": "**Fix:** Strips the unstable `cc_version` fingerprint (e.g. `2.1.92.a3f`) from the system prompt before forwarding. Claude Code computes this fingerprint from `messages[0]` content including meta/attachment blocks — when blocks shift position on resume, the fingerprint changes, the system prompt changes, and the entire prefix cache busts.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** In a validated 7.5-hour Windows session (536 calls), 81% of calls had fingerprint instability — each one a full cache miss (~6-30K tokens of `cache_creation` instead of `cache_read`). Cache hit rate drops from 95-99% to 60-80% on resume sessions.\n\n**When to enable (`true`):** only if upstream CC ships a fingerprint-computation fix and the health status shows `dormant` across multiple sessions.\n\nApplies to both proxy-mode (pipeline extension `fingerprint-strip`, order 100) and preload-mode. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#1-fingerprint-strip-order-100)."
+            "markdownDescription": "**Fix:** Strips the unstable `cc_version` fingerprint (e.g. `2.1.92.a3f`) from the system prompt before forwarding. Claude Code computes this fingerprint from `messages[0]` content including meta/attachment blocks — when blocks shift position on resume, the fingerprint changes, the system prompt changes, and the entire prefix cache busts.\n\n**When this setting is `true`, the fix is skipped** — sets `fingerprint-strip.enabled=false` in the proxy override.\n\n**Cost of skipping:** In a validated 7.5-hour Windows session (536 calls), 81% of calls had fingerprint instability — each one a full cache miss (~6-30K tokens of `cache_creation` instead of `cache_read`). Cache hit rate drops from 95-99% to 60-80% on resume sessions.\n\nPipeline extension `fingerprint-strip`, order 100. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#1-fingerprint-strip-order-100)."
           },
           "claude-code-cache-fix.skipToolSort": {
             "type": "boolean",
             "default": false,
             "order": 2,
-            "markdownDescription": "**Fix:** Sorts tool and MCP-server definitions alphabetically by name before forwarding. Tool definitions can otherwise arrive in different orders between turns; since the API cache key hashes the full request body, different tool ordering produces a different cache key and a full cache miss.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** On sessions with 3+ MCP servers, tool-order jitter was observed on ~15% of calls. Each jitter event triggers a full prefix rebuild: 150K-400K tokens of `cache_creation` depending on context size.\n\n**When to enable (`true`):** only if CC implements deterministic tool ordering upstream. Sort is idempotent — if tools are already sorted, no modification occurs.\n\nApplies to both proxy-mode (pipeline extension `sort-stabilization`, order 200) and preload-mode. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#2-sort-stabilization-order-200)."
+            "markdownDescription": "**Fix:** Sorts tool and MCP-server definitions alphabetically by name before forwarding. Tool definitions can otherwise arrive in different orders between turns; since the API cache key hashes the full request body, different tool ordering produces a different cache key and a full cache miss.\n\n**When this setting is `true`, the fix is skipped** — sets `sort-stabilization.enabled=false`.\n\n**Cost of skipping:** On sessions with 3+ MCP servers, tool-order jitter was observed on ~15% of calls. Each jitter event triggers a full prefix rebuild: 150K-400K tokens of `cache_creation` depending on context size.\n\nPipeline extension `sort-stabilization`, order 200. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#2-sort-stabilization-order-200)."
           },
           "claude-code-cache-fix.skipSessionStartNormalize": {
             "type": "boolean",
             "default": false,
             "order": 3,
-            "markdownDescription": "**Fix:** Applies the same block sorting to the first turn of a fresh session that Claude Code applies to subsequent turns. CC's `normalizeResumeMessages` has an early-return on `length < 2` that skips sorting — so the first call after `/clear` or a new session has unsorted blocks, busting the cache prefix for that turn.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** First turn of every fresh session gets a full cache miss. Not catastrophic (one miss per session) but expensive on sessions with large system prompts. A validated test showed that with the fix, call 2's `cache_read` equals call 1's `cache_creation` to the exact token; without, call 2 is a full miss.\n\nApplies to both proxy-mode (pipeline extension `fresh-session-sort`, order 250) and preload-mode. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#3-fresh-session-sort-order-250)."
-          },
-          "claude-code-cache-fix.skipCacheControlNormalize": {
-            "type": "boolean",
-            "default": false,
-            "order": 4,
-            "markdownDescription": "**Fix:** Pins `cache_control` markers (the `{\"type\": \"ephemeral\"}` annotations that tell the API what to cache) at canonical positions — the last block of the last user message. Without normalization, markers can drift between turns, shifting the cache boundary and causing partial cache misses.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** Marker drift causes partial cache misses on each turn. Not full misses, but enough to increase `cache_creation` steadily over the session.\n\nApplies to both proxy-mode (pipeline extension `cache-control-normalize`, order 400) and preload-mode. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#5-cache-control-normalize-order-400)."
-          },
-          "claude-code-cache-fix.skipTtl": {
-            "type": "boolean",
-            "default": false,
-            "order": 5,
-            "markdownDescription": "**Fix:** Detects the server's cache TTL tier (1-hour or 5-minute) and injects appropriate `cache_control` ephemeral markers to maximize reuse within that window. On cold starts, the server assigns a 5-minute TTL until the first cached call promotes to 1-hour; TTL management accelerates that promotion.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** Requests may lack TTL markers entirely, leaving caching to server defaults which may not be optimal. An A/B test on CC v2.1.117 showed the proxy (all extensions on) achieved a 95.5% cache hit rate vs 82.3% direct on the first warm turn — TTL management is a significant contributor to that 13-point gap.\n\nApplies to both proxy-mode (pipeline extension `ttl-management`, order 500) and preload-mode. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#6-ttl-management-order-500)."
-          }
-        }
-      },
-      {
-        "title": "Claude Code Cache Fix: Preload-mode fixes (CC ≤v2.1.112)",
-        "order": 4,
-        "properties": {
-          "claude-code-cache-fix.skipRelocate": {
-            "type": "boolean",
-            "default": false,
-            "order": 1,
-            "markdownDescription": "> ⚠️ **Preload-mode only** — no effect on CC v2.1.113+ (Bun binary). Use proxy mode for current CC versions.\n\n**Fix:** Scans all user messages for relocated attachment blocks (skills listing, MCP servers, deferred tools, hooks) and moves the latest version of each back to `messages[0]`. On resume, these blocks drift from `messages[0]` to later messages, changing the cache prefix.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** This is the original bug that started the project. Resume sessions without this fix burn 10-20× more than expected — scattered blocks cause a full prefix rebuild on every turn. See [anthropics/claude-code#34629](https://github.com/anthropics/claude-code/issues/34629).\n\nSee [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#block-relocation-cache_fix_skip_relocate)."
+            "markdownDescription": "**Fix:** Applies the same block sorting to the first turn of a fresh session that Claude Code applies to subsequent turns. CC's `normalizeResumeMessages` has an early-return on `length < 2` that skips sorting — so the first call after `/clear` or a new session has unsorted blocks, busting the cache prefix for that turn.\n\n**When this setting is `true`, the fix is skipped** — sets `fresh-session-sort.enabled=false`.\n\n**Cost of skipping:** First turn of every fresh session gets a full cache miss. Not catastrophic (one miss per session) but expensive on sessions with large system prompts.\n\nPipeline extension `fresh-session-sort`, order 250. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#3-fresh-session-sort-order-250)."
           },
           "claude-code-cache-fix.skipSmooshSplit": {
             "type": "boolean",
             "default": false,
-            "order": 2,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix:** Peels `system-reminder` blocks out of tool results so they don't smoosh against the actual tool output in a way that destabilizes the cache boundary.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** System-reminder content mixed into tool results changes the request body hash per turn, partial cache misses accumulate."
+            "order": 4,
+            "markdownDescription": "**Fix (v3.1.0 default-on):** Peels `system-reminder` blocks out of tool results so they don't smoosh against the actual tool output and destabilize the cache boundary.\n\n**When this setting is `true`, the fix is skipped** — sets `smoosh-split.enabled=false`.\n\n**Cost of skipping:** System-reminder content mixed into tool results changes the request body hash per turn, partial cache misses accumulate. Real-world testing of this + `content-strip` + `tool-input-normalize` together recovered cache hit rate from 5.9% to 99.9% in ~2 calls.\n\nPipeline extension `smoosh-split`, order 320 (new in v3.1.0)."
           },
-          "claude-code-cache-fix.skipContinueTrailerStrip": {
+          "claude-code-cache-fix.skipContentStrip": {
             "type": "boolean",
             "default": false,
-            "order": 3,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix:** Strips the `--continue` trailer blocks that CC appends when resuming a conversation — these trailers vary per invocation and break prefix stability.\n\n**When this setting is `true`, the fix is skipped.**\n\n**Cost of skipping:** `--continue` sessions lose cache on the continuation boundary."
+            "order": 5,
+            "markdownDescription": "**Fix (v3.1.0 default-on):** Strips per-turn bookkeeping text (todo-list nags, usage warnings, session-state reminders) that Claude Code injects into request bodies. These mutate per turn and destabilize the cache.\n\n**When this setting is `true`, the fix is skipped** — sets `content-strip.enabled=false`.\n\nPipeline extension `content-strip`, order 330 (new in v3.1.0)."
+          },
+          "claude-code-cache-fix.skipToolInputNormalize": {
+            "type": "boolean",
+            "default": false,
+            "order": 6,
+            "markdownDescription": "**Fix (v3.1.0 default-on):** Normalizes JSON serialization of `tool_use` input fields — key order, whitespace — so the same logical call doesn't produce different cache keys when re-issued.\n\n**When this setting is `true`, the fix is skipped** — sets `tool-input-normalize.enabled=false`.\n\nPipeline extension `tool-input-normalize`, order 340 (new in v3.1.0)."
+          },
+          "claude-code-cache-fix.skipCacheControlNormalize": {
+            "type": "boolean",
+            "default": false,
+            "order": 7,
+            "markdownDescription": "**Fix:** Pins `cache_control` markers (the `{\"type\": \"ephemeral\"}` annotations that tell the API what to cache) at canonical positions — the last block of the last user message. Without normalization, markers can drift between turns, shifting the cache boundary and causing partial cache misses.\n\n**When this setting is `true`, the fix is skipped** — sets `cache-control-normalize.enabled=false`.\n\n**Cost of skipping:** Marker drift causes partial cache misses on each turn. Not full misses, but enough to increase `cache_creation` steadily over the session.\n\nPipeline extension `cache-control-normalize`, order 400. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#5-cache-control-normalize-order-400)."
+          },
+          "claude-code-cache-fix.skipTtl": {
+            "type": "boolean",
+            "default": false,
+            "order": 8,
+            "markdownDescription": "**Fix:** Detects the server's cache TTL tier (1-hour or 5-minute) and injects appropriate `cache_control` ephemeral markers to maximize reuse within that window. On cold starts, the server assigns a 5-minute TTL until the first cached call promotes to 1-hour; TTL management accelerates that promotion.\n\n**When this setting is `true`, the fix is skipped** — sets `ttl-management.enabled=false`.\n\n**Cost of skipping:** Requests may lack TTL markers entirely, leaving caching to server defaults which may not be optimal. An A/B test on CC v2.1.117 showed the proxy (all extensions on) achieved a 95.5% cache hit rate vs 82.3% direct on the first warm turn — TTL management is a significant contributor to that 13-point gap.\n\nPipeline extension `ttl-management`, order 500. See [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#6-ttl-management-order-500)."
           },
           "claude-code-cache-fix.skipDeferredToolsRestore": {
             "type": "boolean",
             "default": false,
-            "order": 4,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix:** Restores the `deferred_tools` block when an MCP server reconnects mid-session. Without this fix, MCP reconnects can drop the block entirely, triggering a downstream cache miss.\n\n**When this setting is `true`, the fix is skipped.**"
-          },
-          "claude-code-cache-fix.skipReminderStrip": {
-            "type": "boolean",
-            "default": false,
-            "order": 5,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix:** Strips bookkeeping reminders (e.g. todo-list nag inserts, usage warnings, session-state reminders) that CC injects unpredictably. These reminders mutate the request body and destabilize the cache.\n\n**When this setting is `true`, the fix is skipped.**"
-          },
-          "claude-code-cache-fix.skipToolUseInputNormalize": {
-            "type": "boolean",
-            "default": false,
-            "order": 6,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix:** Normalizes `tool_use` input-field formatting (whitespace, key order in JSON-like args) to avoid spurious cache-key changes when the same call is re-issued.\n\n**When this setting is `true`, the fix is skipped.**"
-          },
-          "claude-code-cache-fix.skipCacheControlSticky": {
-            "type": "boolean",
-            "default": false,
-            "order": 7,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix:** Preserves `cache_control` sticky markers (promoted positions) across turns so the API's cache boundary stays pinned where we want it, rather than drifting back to wherever CC puts them next.\n\n**When this setting is `true`, the fix is skipped.**"
-          },
-          "claude-code-cache-fix.normalizeIdentity": {
-            "type": "boolean",
-            "default": false,
-            "order": 10,
-            "markdownDescription": "> ⚠️ **Preload-mode only.** Proxy mode has `identity-normalization` always on in the pipeline (order 300).\n\n**Fix (opt-in):** Normalizes the subagent identity string in `system[1]` so it's canonical regardless of whether the session was initiated via `Agent()` or `SendMessage()`. Without normalization, switching between these modes changes the system prompt and busts the cache.\n\n**When this setting is `true`, the fix is active.**\n\n**Impact:** Agent SDK users mixing `Agent()` and `SendMessage()` get a full system-prompt rebuild on every mode switch when this is off.\n\nSee [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#4-identity-normalization-order-300)."
-          },
-          "claude-code-cache-fix.normalizeCwd": {
-            "type": "boolean",
-            "default": false,
-            "order": 11,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix (opt-in):** Replaces volatile CWD and path references in the system prompt with stable placeholders. Useful for cross-worktree cache reuse — two worktrees of the same repo can share the cache prefix after normalization.\n\n**When this setting is `true`, the fix is active.**\n\n**Tradeoff:** can mask genuine path-based ambiguity in the model's reasoning. Enable only when you're actively doing worktree-heavy work and value the cache reuse more than path-context fidelity."
-          },
-          "claude-code-cache-fix.normalizeSmoosh": {
-            "type": "boolean",
-            "default": false,
-            "order": 12,
-            "markdownDescription": "> ⚠️ **Preload-mode only.**\n\n**Fix (opt-in):** Normalizes dynamic values inside `system-reminder` blocks — token-usage counters, budget figures, output-token counts, todo-reminder text — so reminders don't mutate on every turn.\n\n**When this setting is `true`, the fix is active.**\n\nAggressive — set only when you've confirmed that system-reminder churn is your cache-miss bottleneck (via `prefixDiff` snapshots)."
-          }
-        }
-      },
-      {
-        "title": "Claude Code Cache Fix: Prompt & image rewrites",
-        "order": 5,
-        "properties": {
-          "claude-code-cache-fix.imageKeepLast": {
-            "type": "number",
-            "default": 0,
-            "minimum": 0,
-            "maximum": 20,
-            "order": 1,
-            "markdownDescription": "> ⚠️ **Preload-mode only** — no proxy-mode equivalent yet upstream.\n\n**Fix:** Keeps images (read via the `Read` tool, stored as base64) in the last N user messages; replaces older ones with a text placeholder.\n\n**Recommended: `3`.** Enough for multi-turn vision reasoning, strips the compounding tail.\n\n**Cost of `0` (disabled):** A single 500 KB image costs ~62,500 tokens per turn on Opus 4.6, ~85,000+ on Opus 4.7 (35% tokenizer inflation on images). Multiple images compound. In a session with 4 screenshots, disabling image stripping added ~250K tokens per turn — equivalent to doubling the context-window usage.\n\nSee [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#image-stripping-cache_fix_image_keep_lastn)."
-          },
-          "claude-code-cache-fix.stripGitStatus": {
-            "type": "boolean",
-            "default": false,
-            "order": 2,
-            "markdownDescription": "> ⚠️ **Preload-mode only.** There is a **better native alternative:** set the environment variable `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` instead. Same effect, no interceptor needed, works on Bun-binary CC too.\n\n**Fix (opt-in):** Strips CC's injected `git status` output from the system prompt. CC otherwise embeds live git-status on every call; any file edit changes git-status → system prompt changes → entire prefix cache busts.\n\n**When this setting is `true`, the fix is active.**\n\n**Impact:** A validated test with the native flag set showed 18-token `cache_creation` across git-state changes (vs thousands without). Saves ~1,800 tokens per call (the removed `git status` block plus related Bash-tool description text).\n\nSee [impact guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md#git-status-stripping-cache_fix_strip_git_status)."
-          },
-          "claude-code-cache-fix.outputEfficiencyReplacement": {
-            "type": "string",
-            "default": "",
-            "editPresentation": "multilineText",
-            "order": 3,
-            "markdownDescription": "> ⚠️ **Preload-mode only.** Modifies the model's system prompt.\n\nReplace Claude Code's `# Output efficiency` system-prompt section with custom text. Leave empty to keep the default.\n\n**Not a cache fix** — purely behavioral. Used by operators who want to steer how Claude balances thoroughness vs terseness. Three known variants are catalogued in the [output-efficiency-prompts reference](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/output-efficiency-prompts.md).\n\n**Caution:** changing this mid-session changes the system prompt and **will bust the cache** until turn 2 of a new session."
+            "order": 9,
+            "markdownDescription": "**Fix (v3.1.0 default-on, env-var controlled):** Persists clean `deferred_tools` blocks and restores them when an MCP server reconnects mid-session. Without this fix, MCP reconnect race conditions can shrink tool attachments and trigger massive cache misses.\n\n**When this setting is `true`, the fix is skipped** — sets `CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE=1` in the proxy spawn env.\n\n**Cost of skipping:** Any session that uses MCP and survives a server reconnect (network blip, server restart, transient timeout) eats a full prefix rebuild on the next turn. New in v3.1.0; addresses a class of cache misses that wasn't covered by earlier extensions."
           }
         }
       }

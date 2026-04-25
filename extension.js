@@ -5,6 +5,9 @@ const http = require('http');
 const https = require('https');
 const { execSync, spawn } = require('child_process');
 
+// Legacy preload-mode setting we still touch only to clear stale entries left
+// by 0.6.x. v0.7.0 dropped wrapper support entirely; there is no scenario where
+// we want this to be set by us anymore.
 const WRAPPER_SETTING = 'claudeCode.claudeProcessWrapper';
 const ENV_SETTING = 'claudeCode.environmentVariables';
 const CONFIG_KEY = 'claude-code-cache-fix';
@@ -27,15 +30,12 @@ function getProxyLogPath() {
 }
 
 /**
- * Pick the package manager to use for installing the interceptor.
+ * Pick the package manager to use for installing claude-code-cache-fix.
  * Volta wins if both `volta` is on PATH AND `npm` resolves to a Volta-managed binary
  * (i.e. the user's whole Node toolchain is Volta — `npm install -g` would still work
  * but bypasses Volta's tracking, so we'd be silently inconsistent with `volta list`).
- *
- * Returns `{ name: 'volta'|'npm', cmd: 'volta'|'npm', args: string[] }` or null when
- * neither tool is reachable.
  */
-function detectInstallerForInterceptor() {
+function detectInstallerForPackage() {
   const which = (name) => {
     try {
       const out = execSync(process.platform === 'win32' ? `where ${name}` : `command -v ${name}`,
@@ -59,8 +59,8 @@ function detectInstallerForInterceptor() {
  * Install (or upgrade) the claude-code-cache-fix npm package using the detected manager.
  * Reports progress in a notification and streams output to the proxy channel.
  */
-async function installInterceptor(reason) {
-  const installer = detectInstallerForInterceptor();
+async function installPackage(reason) {
+  const installer = detectInstallerForPackage();
   if (!installer) {
     return { ok: false, reason: 'neither volta nor npm on PATH' };
   }
@@ -69,7 +69,7 @@ async function installInterceptor(reason) {
   channel.appendLine(`[${new Date().toISOString()}] Auto-install (${reason}): ${cmdline}`);
   // Reset caches so post-install the new path is picked up.
   _npmRoot = null;
-  _interceptorDir = null;
+  _packageDir = null;
 
   return await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `Cache Fix: ${reason} via ${installer.name}…`, cancellable: false },
@@ -132,6 +132,15 @@ function computeProxyEnv() {
     env.CACHE_FIX_PROXY_REJECT_UNAUTHORIZED = '0';
     env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   }
+
+  // v3.1.0 env-var-controlled extensions (not in extensions.json)
+  if (cfg.get('prefixDiff', false)) {
+    env.CACHE_FIX_PREFIXDIFF = '1';
+  }
+  if (cfg.get('skipDeferredToolsRestore', false)) {
+    env.CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE = '1';
+  }
+
   return { env, summary: { httpsProxy, noProxy, caFile, rejectUnauthorized } };
 }
 
@@ -216,7 +225,6 @@ async function maybeAutoExportCerts() {
  */
 async function testProxyConnection() {
   const channel = getProxyChannel();
-  const cfg = vscode.workspace.getConfiguration(CONFIG_KEY);
   const { summary } = computeProxyEnv();
   const { httpsProxy, noProxy, caFile, rejectUnauthorized } = summary;
 
@@ -234,7 +242,7 @@ async function testProxyConnection() {
       const wantsAgent = httpsProxy || caFile || !rejectUnauthorized;
       if (wantsAgent) {
         try {
-          const dir = getInterceptorDir();
+          const dir = getPackageDir();
           const hpagentPath = dir ? path.join(dir, 'node_modules', 'hpagent') : '';
           if (httpsProxy && hpagentPath && fs.existsSync(hpagentPath)) {
             const { HttpsProxyAgent } = require(hpagentPath);
@@ -318,59 +326,77 @@ async function testProxyConnection() {
  */
 function patchPipelineMjsIfNeeded() {
   if (process.platform !== 'win32') return { patched: false, restart: false, reason: 'not windows' };
-  const dir = getInterceptorDir();
-  if (!dir) return { patched: false, restart: false, reason: 'interceptor not installed' };
-  const file = path.join(dir, 'proxy', 'pipeline.mjs');
-  if (!fs.existsSync(file)) return { patched: false, restart: false, reason: 'pipeline.mjs missing' };
+  const dir = getPackageDir();
+  if (!dir) return { patched: false, restart: false, reason: 'package dir not found' };
+  const p = path.join(dir, 'proxy', 'pipeline.mjs');
+  if (!fs.existsSync(p)) return { patched: false, restart: false, reason: 'pipeline.mjs not found' };
   let src;
-  try { src = fs.readFileSync(file, 'utf-8'); }
+  try { src = fs.readFileSync(p, 'utf-8'); }
   catch (err) { return { patched: false, restart: false, reason: `read failed: ${err.message}` }; }
-
-  // Idempotency check — pathToFileURL is the marker.
-  if (src.includes('pathToFileURL(join(dir, file))')) {
+  if (src.includes('pathToFileURL(') && src.includes('await import(pathToFileURL')) {
     return { patched: false, restart: false, reason: 'already patched' };
   }
-  const buggyLine = 'const mod = await import(join(dir, file) + "?t=" + Date.now());';
-  if (!src.includes(buggyLine)) {
+  // The buggy form on @<=3.0.1: `await import(join(dir, file))`
+  const buggy = 'await import(join(';
+  if (!src.includes(buggy)) {
     return { patched: false, restart: false, reason: 'buggy line not found (upstream may have fixed)' };
   }
-  const fixedLine = 'const mod = await import(pathToFileURL(join(dir, file)).href + "?t=" + Date.now());';
-  let newSrc = src.replace(buggyLine, fixedLine);
-  if (!newSrc.includes('from "node:url"') && !newSrc.includes("from 'node:url'")) {
-    // Insert the import after the last existing top-of-file import line.
-    const lines = newSrc.split('\n');
-    let lastImportIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (/^\s*import\s/.test(lines[i])) lastImportIdx = i;
-      else if (lastImportIdx >= 0 && lines[i].trim() === '') break;
-    }
-    if (lastImportIdx >= 0) {
-      lines.splice(lastImportIdx + 1, 0, 'import { pathToFileURL } from "node:url";');
-      newSrc = lines.join('\n');
-    } else {
-      newSrc = 'import { pathToFileURL } from "node:url";\n' + newSrc;
+  // Inject the import for pathToFileURL if missing.
+  if (!/pathToFileURL/.test(src)) {
+    src = src.replace(/import\s*\{([^}]*)\}\s*from\s*['"]url['"]\s*;?/,
+      (m, names) => `import { ${names.includes('pathToFileURL') ? names : names.trim() + ', pathToFileURL'} } from 'url';`);
+    if (!/pathToFileURL/.test(src)) {
+      src = `import { pathToFileURL } from 'url';\n` + src;
     }
   }
-  try { fs.writeFileSync(file, newSrc); }
+  src = src.split('await import(join(').join('await import(pathToFileURL(join(');
+  // Close the extra paren we just opened. Convert `import(pathToFileURL(join(a, b))` → add `.href)`
+  // The original line was `await import(join(a, b));` → now `await import(pathToFileURL(join(a, b)).href);`
+  src = src.replace(/await import\(pathToFileURL\(join\(([^)]+)\)\)/g, 'await import(pathToFileURL(join($1)).href)');
+
+  try { fs.writeFileSync(p, src, 'utf-8'); }
   catch (err) { return { patched: false, restart: false, reason: `write failed: ${err.message}` }; }
   // If the proxy is already running it loaded the broken module — needs respawn.
   const restart = !!(proxyProcess && proxyProcess.exitCode === null);
   return { patched: true, restart, reason: null };
 }
 
-// Mirror the npm package's default extensions.json, but force `request-log` on
-// so the proxy emits NDJSON telemetry for every stream event. Rewritten on each
-// activate so upstream changes don't drift our override silently.
+/**
+ * Sync our override of the proxy's extensions.json to v3.1.0 defaults, with VS Code
+ * settings flipping individual extensions off when the user requested the "skip"
+ * variant. Forces `request-log: enabled=true` so the proxy emits NDJSON telemetry
+ * for every stream event (upstream defaults this to off; we want it on for the
+ * "Open Proxy Request Log" command to do anything useful).
+ *
+ * Rewritten on each activate so upstream changes don't drift our override silently
+ * and so users can flip a setting and see the effect on next proxy restart.
+ *
+ * Mapping: VS Code setting → extension key
+ *   skipFingerprint            → fingerprint-strip
+ *   skipToolSort               → sort-stabilization
+ *   skipSessionStartNormalize  → fresh-session-sort
+ *   skipSmooshSplit            → smoosh-split            (v3.1.0 default-on)
+ *   skipContentStrip           → content-strip           (v3.1.0 default-on)
+ *   skipToolInputNormalize     → tool-input-normalize    (v3.1.0 default-on)
+ *   skipCacheControlNormalize  → cache-control-normalize
+ *   skipTtl                    → ttl-management
+ * (identity-normalization is always on; cache-telemetry is always on.)
+ */
 function ensureProxyExtensionsConfig() {
+  const cfg = vscode.workspace.getConfiguration(CONFIG_KEY);
+  const enabled = (skipKey) => !cfg.get(skipKey, false);
   const config = {
-    'fingerprint-strip': { enabled: true, order: 100 },
-    'sort-stabilization': { enabled: true, order: 200 },
-    'fresh-session-sort': { enabled: true, order: 250 },
-    'identity-normalization': { enabled: true, order: 300 },
-    'cache-control-normalize': { enabled: true, order: 400 },
-    'ttl-management': { enabled: true, order: 500 },
-    'cache-telemetry': { enabled: true, order: 600 },
-    'request-log': { enabled: true, order: 700 },
+    'fingerprint-strip':       { enabled: enabled('skipFingerprint'),           order: 100 },
+    'sort-stabilization':      { enabled: enabled('skipToolSort'),              order: 200 },
+    'fresh-session-sort':      { enabled: enabled('skipSessionStartNormalize'), order: 250 },
+    'identity-normalization':  { enabled: true,                                 order: 300 },
+    'smoosh-split':            { enabled: enabled('skipSmooshSplit'),           order: 320 },
+    'content-strip':           { enabled: enabled('skipContentStrip'),          order: 330 },
+    'tool-input-normalize':    { enabled: enabled('skipToolInputNormalize'),    order: 340 },
+    'cache-control-normalize': { enabled: enabled('skipCacheControlNormalize'), order: 400 },
+    'ttl-management':          { enabled: enabled('skipTtl'),                   order: 500 },
+    'cache-telemetry':         { enabled: true,                                 order: 600 },
+    'request-log':             { enabled: true,                                 order: 700 },
   };
   const configPath = getProxyExtensionsConfigPath();
   try {
@@ -421,6 +447,12 @@ async function startProxyServer() {
   }
   if (!proxyCfg.summary.rejectUnauthorized) {
     channel.appendLine(`[${new Date().toISOString()}] WARNING: TLS verification disabled — upstream certificates not validated.`);
+  }
+  if (proxyCfg.env.CACHE_FIX_PREFIXDIFF) {
+    channel.appendLine(`[${new Date().toISOString()}] prefix-diff snapshots enabled (~/.claude/cache-fix-snapshots/)`);
+  }
+  if (proxyCfg.env.CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE) {
+    channel.appendLine(`[${new Date().toISOString()}] deferred-tools-restore SKIPPED (skipDeferredToolsRestore=true)`);
   }
   try {
     const child = spawn(process.execPath, [proxyPath], {
@@ -490,9 +522,9 @@ function getNpmRoot() {
  *      (some Volta versions keep the canonical copy here).
  * VOLTA_HOME defaults: %LOCALAPPDATA%\Volta on Windows, ~/.volta elsewhere.
  */
-let _interceptorDir = null;
-function getInterceptorDir() {
-  if (_interceptorDir) return _interceptorDir;
+let _packageDir = null;
+function getPackageDir() {
+  if (_packageDir) return _packageDir;
   const candidates = [];
   const npmRoot = getNpmRoot();
   if (npmRoot) candidates.push(path.join(npmRoot, 'claude-code-cache-fix'));
@@ -506,7 +538,7 @@ function getInterceptorDir() {
   }
   for (const p of candidates) {
     if (fs.existsSync(path.join(p, 'package.json'))) {
-      _interceptorDir = p;
+      _packageDir = p;
       return p;
     }
   }
@@ -514,258 +546,50 @@ function getInterceptorDir() {
 }
 
 /**
- * Check if the interceptor npm package is installed globally.
+ * Check if claude-code-cache-fix is installed AND ships the proxy server (v3.0.1+).
+ * v0.7.0 only supports proxy mode — older packages without proxy/server.mjs are
+ * effectively useless and we treat them as not-installed so auto-install kicks in.
  */
-function isInterceptorInstalled() {
-  const dir = getInterceptorDir();
-  if (!dir) return false;
-  return fs.existsSync(path.join(dir, 'preload.mjs'));
+function isPackageInstalled() {
+  return !!getProxyServerPath();
 }
 
 /**
- * Check if Claude Code npm package is installed globally.
+ * Get the path to the proxy server script (proxy/server.mjs), or null.
  */
-function isClaudeCodeInstalled() {
-  const npmRoot = getNpmRoot();
-  if (!npmRoot) return false;
-  return fs.existsSync(path.join(npmRoot, '@anthropic-ai', 'claude-code', 'cli.js'));
+function getProxyServerPath() {
+  const dir = getPackageDir();
+  if (!dir) return null;
+  const proxyPath = path.join(dir, 'proxy', 'server.mjs');
+  if (fs.existsSync(proxyPath)) return proxyPath;
+  return null;
 }
 
 /**
- * Stable on-disk location for the wrapper, shared across extension updates.
- * Writing the wrapper setting to this path avoids the "folder changes on every update"
- * breakage where claudeCode.claudeProcessWrapper rots to point at a prior version's extension dir.
+ * Clear any leftover claudeCode.claudeProcessWrapper that we (a prior 0.6.x version
+ * of this extension) wrote. v0.7.0 dropped wrapper support entirely — proxy mode is
+ * the only mode now. Only touches the setting if the value clearly belongs to us.
  */
-function getStableBinDir() {
-  return path.join(require('os').homedir(), '.claude', 'cache-fix-bin');
-}
-function getStableWrapperPath() {
-  const ext = process.platform === 'win32' ? 'ClaudeCodeCacheFixWrapper.exe' : 'wrapper.js';
-  return path.join(getStableBinDir(), ext);
-}
-
-/**
- * Mirror the bundled wrapper into the stable bin dir if it's missing or outdated.
- * Returns the stable path on success, null on failure.
- */
-function ensureStableWrapperCopy(context) {
-  const srcName = process.platform === 'win32' ? 'ClaudeCodeCacheFixWrapper.exe' : 'wrapper.js';
-  const src = path.join(context.extensionPath, srcName);
-  if (!fs.existsSync(src)) return null;
-  const dstDir = getStableBinDir();
-  const dst = path.join(dstDir, srcName);
-  try {
-    fs.mkdirSync(dstDir, { recursive: true });
-    const srcStat = fs.statSync(src);
-    let needsCopy = true;
-    if (fs.existsSync(dst)) {
-      const dstStat = fs.statSync(dst);
-      if (dstStat.size === srcStat.size && dstStat.mtimeMs >= srcStat.mtimeMs) {
-        needsCopy = false;
-      }
-    }
-    if (needsCopy) {
-      fs.copyFileSync(src, dst);
-      // Preserve mtime so later comparisons stay sensible.
-      fs.utimesSync(dst, srcStat.atime, srcStat.mtime);
-    }
-    return dst;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Get the path to the appropriate wrapper for this platform.
- * Preference order:
- *  1. npm-global tools/ (stable)
- *  2. ~/.claude/cache-fix-bin/ stable copy (stable across extension updates)
- *  3. bundled in extension directory (versioned path — last resort)
- */
-function getWrapperPath(context) {
-  if (process.platform === 'win32') {
-    const dir = getInterceptorDir();
-    if (dir) {
-      const npmExe = path.join(dir, 'tools', 'ClaudeCodeCacheFixWrapper.exe');
-      if (fs.existsSync(npmExe)) return npmExe;
-    }
-    const stable = getStableWrapperPath();
-    if (fs.existsSync(stable)) return stable;
-    const exePath = path.join(context.extensionPath, 'ClaudeCodeCacheFixWrapper.exe');
-    if (fs.existsSync(exePath)) return exePath;
-    return null;
-  }
-  const stable = getStableWrapperPath();
-  if (fs.existsSync(stable)) return stable;
-  return path.join(context.extensionPath, 'wrapper.js');
-}
-
-/**
- * Is the currently-written wrapper setting one we control? (Matches our extension folder
- * or our stable bin dir — we should never touch a wrapper that belongs to someone else.)
- */
-function isOurWrapperSetting(current, context) {
-  if (typeof current !== 'string' || !current) return false;
+async function clearOurWrapperSetting() {
+  const config = vscode.workspace.getConfiguration();
+  const current = config.get(WRAPPER_SETTING);
+  if (typeof current !== 'string' || !current) return;
   const lc = current.toLowerCase();
-  const extLc = (context.extensionPath || '').toLowerCase();
-  const stableLc = getStableBinDir().toLowerCase();
-  if (lc.includes('claude-code-cache-fix') && lc.includes('.vscode-insiders\\extensions')) return true;
-  if (lc.includes('claude-code-cache-fix') && lc.includes('.vscode\\extensions')) return true;
-  if (lc.includes('claude-code-cache-fix') && lc.includes('cursor\\extensions')) return true;
-  if (extLc && lc.startsWith(extLc)) return true;
-  if (lc.startsWith(stableLc)) return true;
-  return false;
-}
-
-/**
- * Repair a stale wrapper setting left behind by a prior extension version.
- * Either rewrites it to the stable path, or clears it if proxy mode is taking over.
- */
-async function reconcileWrapperSetting(context, { proxyTakingOver }) {
-  const config = vscode.workspace.getConfiguration();
-  const current = config.get(WRAPPER_SETTING);
-  if (!current) return;
-  if (!isOurWrapperSetting(current, context)) return;
-
-  if (proxyTakingOver) {
-    await config.update(WRAPPER_SETTING, undefined, vscode.ConfigurationTarget.Global);
-    return;
-  }
-
-  const stable = ensureStableWrapperCopy(context) || getWrapperPath(context);
-  if (!stable) {
-    if (!fs.existsSync(current)) {
-      await config.update(WRAPPER_SETTING, undefined, vscode.ConfigurationTarget.Global);
-    }
-    return;
-  }
-  if (path.normalize(current).toLowerCase() !== path.normalize(stable).toLowerCase()) {
-    await config.update(WRAPPER_SETTING, stable, vscode.ConfigurationTarget.Global);
-  }
-}
-
-/**
- * Check if the wrapper is currently configured.
- */
-function isEnabled() {
-  const config = vscode.workspace.getConfiguration();
-  const current = config.get(WRAPPER_SETTING);
-  return current && current.includes('claude-code-cache-fix');
-}
-
-/**
- * Enable the cache fix by setting the process wrapper.
- */
-async function enable(context) {
-  // Check npm packages
-  if (!isInterceptorInstalled()) {
-    const action = await vscode.window.showWarningMessage(
-      'claude-code-cache-fix npm package not found. Install it with: npm install -g claude-code-cache-fix',
-      'Copy Install Command'
-    );
-    if (action === 'Copy Install Command') {
-      await vscode.env.clipboard.writeText('npm install -g claude-code-cache-fix');
-      vscode.window.showInformationMessage('Install command copied to clipboard.');
-    }
-    return;
-  }
-
-  if (!isClaudeCodeInstalled()) {
-    const action = await vscode.window.showWarningMessage(
-      'Claude Code npm package not found. The cache fix requires the npm version, not the standalone binary. Install with: npm install -g @anthropic-ai/claude-code',
-      'Copy Install Command'
-    );
-    if (action === 'Copy Install Command') {
-      await vscode.env.clipboard.writeText('npm install -g @anthropic-ai/claude-code');
-      vscode.window.showInformationMessage('Install command copied to clipboard.');
-    }
-    return;
-  }
-
-  // Mirror the bundled wrapper into a stable per-user location so the saved setting
-  // survives extension updates (the versioned extension folder changes on every bump).
-  ensureStableWrapperCopy(context);
-  const wrapperPath = getWrapperPath(context);
-
-  // Windows-specific: need the .exe bridge
-  if (process.platform === 'win32' && !wrapperPath) {
-    const action = await vscode.window.showWarningMessage(
-      'Windows requires a native .exe wrapper. Compile it from the C source in the claude-code-cache-fix package, or download from GitHub Releases.',
-      'Copy Compile Command', 'Open Releases'
-    );
-    if (action === 'Copy Compile Command') {
-      const dir = getInterceptorDir();
-      const src = dir ? path.join(dir, 'tools', 'claude-vscode-wrapper.c') : 'claude-vscode-wrapper.c';
-      await vscode.env.clipboard.writeText(`cl "${src}" /Fe:ClaudeCodeCacheFixWrapper.exe`);
-      vscode.window.showInformationMessage('Compile command copied. Place the .exe in the extension directory or the cache-fix tools/ directory.');
-    } else if (action === 'Open Releases') {
-      vscode.env.openExternal(vscode.Uri.parse('https://github.com/cnighswonger/claude-code-cache-fix-vscode/releases/latest'));
-    }
-    return;
-  }
-
-  const config = vscode.workspace.getConfiguration();
-
-  // Check if another wrapper is already set
-  const current = config.get(WRAPPER_SETTING);
-  if (current && !current.includes('claude-code-cache-fix')) {
-    const choice = await vscode.window.showWarningMessage(
-      `Another process wrapper is already configured: ${current}. Replace it?`,
-      'Replace', 'Cancel'
-    );
-    if (choice !== 'Replace') return;
-  }
-
-  await config.update(WRAPPER_SETTING, wrapperPath, vscode.ConfigurationTarget.Global);
-  vscode.window.showInformationMessage(
-    'Claude Code Cache Fix enabled. Restart any active Claude Code session to apply.'
-  );
-}
-
-/**
- * Disable the cache fix by clearing the process wrapper.
- */
-async function disable() {
-  const config = vscode.workspace.getConfiguration();
-  const current = config.get(WRAPPER_SETTING);
-
-  if (!current || !current.includes('claude-code-cache-fix')) {
-    vscode.window.showInformationMessage('Claude Code Cache Fix is not currently enabled.');
-    return;
-  }
-
+  const looksLikeOurs =
+    (lc.includes('claude-code-cache-fix') &&
+      (lc.includes('.vscode\\extensions') || lc.includes('.vscode-insiders\\extensions') || lc.includes('cursor\\extensions') || lc.includes('cache-fix-bin')));
+  if (!looksLikeOurs) return;
   await config.update(WRAPPER_SETTING, undefined, vscode.ConfigurationTarget.Global);
-  vscode.window.showInformationMessage(
-    'Claude Code Cache Fix disabled. Restart any active Claude Code session to apply.'
+  getProxyChannel().appendLine(
+    `[${new Date().toISOString()}] Cleared legacy claudeCode.claudeProcessWrapper (was: ${current}). v0.7.0 dropped preload mode.`
   );
 }
 
 /**
  * Show current status.
  */
-async function showStatus(context) {
-  const interceptorInstalled = isInterceptorInstalled();
-  const ccInstalled = isClaudeCodeInstalled();
-  const enabled = isEnabled();
-  const wrapperPath = getWrapperPath(context);
-
-  let statsInfo = '';
-  try {
-    const homeDir = require('os').homedir();
-    const statsPath = path.join(homeDir, '.claude', 'cache-fix-stats.json');
-    if (fs.existsSync(statsPath)) {
-      const stats = JSON.parse(fs.readFileSync(statsPath, 'utf-8'));
-      const fixes = stats.fixes || {};
-      const parts = [];
-      for (const [name, data] of Object.entries(fixes)) {
-        if (data.applied > 0) parts.push(`${name}: ${data.applied} applied`);
-        else if (data.safetyBlocked > 0) parts.push(`${name}: safety-blocked`);
-        else if (data.skipped > 0) parts.push(`${name}: dormant`);
-      }
-      if (parts.length > 0) statsInfo = '\n\nFix stats: ' + parts.join(', ');
-    }
-  } catch {}
-
+async function showStatus() {
+  const installed = isPackageInstalled();
   const proxyEnabled = isProxyEnabled();
   const proxyPath = getProxyServerPath();
   const proxyListening = await probeProxyRunning(500);
@@ -775,19 +599,18 @@ async function showStatus(context) {
 
   const lines = [
     `Platform: ${process.platform}`,
-    `Interceptor installed: ${interceptorInstalled ? 'Yes' : 'No'}`,
-    `Claude Code (npm) installed: ${ccInstalled ? 'Yes' : 'No'}`,
-    `Mode: ${proxyEnabled ? 'Proxy' : enabled ? 'Preload (wrapper)' : 'Disabled'}`,
-    proxyEnabled ? `Proxy URL: ${DEFAULT_PROXY_URL}` : `Wrapper path: ${wrapperPath || 'Not available'}`,
-    `Proxy script: ${proxyPath ? 'Available (v3.0.1+)' : 'Not found (update npm package)'}`,
+    `claude-code-cache-fix npm package: ${installed ? 'installed (proxy server present)' : 'NOT INSTALLED'}`,
+    `Mode: ${proxyEnabled ? 'Proxy' : 'Disabled'}`,
+    proxyEnabled ? `Proxy URL: ${DEFAULT_PROXY_URL}` : '',
+    `Proxy script: ${proxyPath ? proxyPath : 'Not found (run npm install -g claude-code-cache-fix@latest)'}`,
     `Proxy listening: ${proxyListening ? 'Yes' : 'No'}${proxyManaged ? ' (managed by extension)' : proxyListening ? ' (external process)' : ''}`,
     `Corp HTTP proxy: ${corpEnv.httpsProxy || '(none)'}`,
     `NO_PROXY: ${corpEnv.noProxy || '(none)'}`,
     `CA file: ${corpEnv.caFile || '(system default)'}${corpEnv.caFile ? (caFileExists ? ' OK' : ' MISSING') : ''}`,
     `TLS verify: ${corpEnv.rejectUnauthorized ? 'enabled' : 'DISABLED (insecure)'}`,
-  ];
+  ].filter(Boolean);
 
-  vscode.window.showInformationMessage('Cache Fix Status:\n' + lines.join('\n') + statsInfo);
+  vscode.window.showInformationMessage('Cache Fix Status:\n' + lines.join('\n'));
 }
 
 /**
@@ -815,41 +638,20 @@ function isProxyEnabled() {
 }
 
 /**
- * Get the path to the proxy server script.
- */
-function getProxyServerPath() {
-  const dir = getInterceptorDir();
-  if (!dir) return null;
-  const proxyPath = path.join(dir, 'proxy', 'server.mjs');
-  if (fs.existsSync(proxyPath)) return proxyPath;
-  return null;
-}
-
-/**
  * Enable proxy mode by setting ANTHROPIC_BASE_URL in Claude Code env vars.
  * @param {{silent?: boolean}} opts - silent mode suppresses popups and skips the external-URL prompt
  */
 async function enableProxy(opts = {}) {
   const silent = !!opts.silent;
 
-  if (!isInterceptorInstalled()) {
+  if (!isPackageInstalled()) {
     if (silent) return;
     const action = await vscode.window.showWarningMessage(
-      'claude-code-cache-fix npm package not found (v3.0.1+ required for proxy). Install with: npm install -g claude-code-cache-fix',
+      'claude-code-cache-fix npm package not found (v3.0.1+ required). Install with: npm install -g claude-code-cache-fix',
       'Copy Install Command'
     );
     if (action === 'Copy Install Command') {
       await vscode.env.clipboard.writeText('npm install -g claude-code-cache-fix');
-    }
-    return;
-  }
-
-  const proxyPath = getProxyServerPath();
-  if (!proxyPath) {
-    if (!silent) {
-      vscode.window.showWarningMessage(
-        'Proxy server not found. Update to v3.0.1+: npm install -g claude-code-cache-fix@latest'
-      );
     }
     return;
   }
@@ -947,74 +749,43 @@ async function disableProxy() {
   );
 }
 
-/**
- * Write VS Code settings to a config file the wrapper reads at launch.
- * Bridges VS Code UI settings into env vars for the interceptor.
- */
-function syncSettings() {
-  const config = vscode.workspace.getConfiguration(CONFIG_KEY);
-  const homeDir = require('os').homedir();
-  const configPath = path.join(homeDir, '.claude', 'cache-fix-vscode-config.json');
-  const settings = {
-    debug: config.get('debug', false),
-    stripGitStatus: config.get('stripGitStatus', false),
-    outputEfficiencyReplacement: config.get('outputEfficiencyReplacement', ''),
-    imageKeepLast: config.get('imageKeepLast', 0),
-    normalizeIdentity: config.get('normalizeIdentity', false),
-    normalizeCwd: config.get('normalizeCwd', false),
-    normalizeSmoosh: config.get('normalizeSmoosh', false),
-    prefixDiff: config.get('prefixDiff', false),
-    skipRelocate: config.get('skipRelocate', false),
-    skipFingerprint: config.get('skipFingerprint', false),
-    skipToolSort: config.get('skipToolSort', false),
-    skipTtl: config.get('skipTtl', false),
-    skipSmooshSplit: config.get('skipSmooshSplit', false),
-    skipSessionStartNormalize: config.get('skipSessionStartNormalize', false),
-    skipContinueTrailerStrip: config.get('skipContinueTrailerStrip', false),
-    skipDeferredToolsRestore: config.get('skipDeferredToolsRestore', false),
-    skipReminderStrip: config.get('skipReminderStrip', false),
-    skipCacheControlNormalize: config.get('skipCacheControlNormalize', false),
-    skipToolUseInputNormalize: config.get('skipToolUseInputNormalize', false),
-    skipCacheControlSticky: config.get('skipCacheControlSticky', false),
-  };
-  try {
-    fs.writeFileSync(configPath, JSON.stringify(settings, null, 2));
-  } catch {}
-}
-
 function activate(context) {
-  // Sync settings on activation and when they change
-  syncSettings();
-  const PROXY_ENV_KEYS = [
+  // Restart proxy when any setting that feeds spawn env / extensions config changes,
+  // so users see their toggle take effect on save without a VS Code restart.
+  const RESTART_KEYS = [
     `${CONFIG_KEY}.httpsProxy`,
     `${CONFIG_KEY}.noProxy`,
     `${CONFIG_KEY}.caFile`,
     `${CONFIG_KEY}.rejectUnauthorized`,
     `${CONFIG_KEY}.autoExportCerts`,
     `${CONFIG_KEY}.certSearchPatterns`,
+    `${CONFIG_KEY}.skipFingerprint`,
+    `${CONFIG_KEY}.skipToolSort`,
+    `${CONFIG_KEY}.skipSessionStartNormalize`,
+    `${CONFIG_KEY}.skipSmooshSplit`,
+    `${CONFIG_KEY}.skipContentStrip`,
+    `${CONFIG_KEY}.skipToolInputNormalize`,
+    `${CONFIG_KEY}.skipCacheControlNormalize`,
+    `${CONFIG_KEY}.skipTtl`,
+    `${CONFIG_KEY}.skipDeferredToolsRestore`,
+    `${CONFIG_KEY}.prefixDiff`,
   ];
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
-      if (e.affectsConfiguration(CONFIG_KEY)) syncSettings();
-      // If any proxy/CA setting changed and the proxy is currently managed,
-      // re-export certs (if enabled) and restart the proxy to pick up the new env.
-      const proxyEnvChanged = PROXY_ENV_KEYS.some((k) => e.affectsConfiguration(k));
-      if (proxyEnvChanged) {
-        await maybeAutoExportCerts();
-        if (proxyProcess && proxyProcess.exitCode === null) {
-          getProxyChannel().appendLine(`[${new Date().toISOString()}] Proxy/CA setting changed — restarting proxy.`);
-          stopProxyServer();
-          await startProxyServer();
-        }
+      const restartNeeded = RESTART_KEYS.some((k) => e.affectsConfiguration(k));
+      if (!restartNeeded) return;
+      await maybeAutoExportCerts();
+      if (proxyProcess && proxyProcess.exitCode === null) {
+        getProxyChannel().appendLine(`[${new Date().toISOString()}] Setting changed — restarting proxy.`);
+        stopProxyServer();
+        await startProxyServer();
       }
     })
   );
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand(`${CONFIG_KEY}.enable`, () => enable(context)),
-    vscode.commands.registerCommand(`${CONFIG_KEY}.disable`, () => disable()),
-    vscode.commands.registerCommand(`${CONFIG_KEY}.status`, () => showStatus(context)),
+    vscode.commands.registerCommand(`${CONFIG_KEY}.status`, () => showStatus()),
     vscode.commands.registerCommand(`${CONFIG_KEY}.enableProxy`, () => enableProxy()),
     vscode.commands.registerCommand(`${CONFIG_KEY}.disableProxy`, () => disableProxy()),
     vscode.commands.registerCommand(`${CONFIG_KEY}.openProxyLog`, async () => {
@@ -1055,25 +826,22 @@ function activate(context) {
   const autoStart = cfg.get('autoStartProxy', true);
   const autoInstall = cfg.get('autoInstallInterceptor', true);
 
-  // Mirror the bundled .exe to a stable path and repair any stale wrapper setting
-  // left behind by a prior extension version. This runs BEFORE any proxy/preload branch
-  // so a stale path doesn't live on past this activation.
-  ensureStableWrapperCopy(context);
+  // v0.7.0 dropped wrapper/preload support. Clear any leftover wrapper setting we
+  // wrote in 0.6.x so it doesn't keep pointing at a now-deleted .exe inside a stale
+  // versioned extension folder.
+  clearOurWrapperSetting().catch(() => {});
 
-  // If the npm interceptor is missing and auto-install is on, pull it in via
-  // whichever package manager owns the user's Node toolchain (volta if npm goes
-  // through volta, else plain npm). Then continue with the proxy auto-start.
   // Wrapped in an IIFE so activate() returns synchronously.
   (async () => {
     // Auto-export Windows corporate certs (if enabled) BEFORE we compute proxy env,
     // so the resulting bundle path lands in the spawn env on first start.
     await maybeAutoExportCerts();
 
-    let interceptorReady = isInterceptorInstalled();
-    if (!interceptorReady && autoStart && autoInstall) {
-      const r = await installInterceptor('installing claude-code-cache-fix');
-      interceptorReady = r.ok && isInterceptorInstalled();
-      if (!interceptorReady) {
+    let packageReady = isPackageInstalled();
+    if (!packageReady && autoStart && autoInstall) {
+      const r = await installPackage('installing claude-code-cache-fix');
+      packageReady = r.ok && isPackageInstalled();
+      if (!packageReady) {
         vscode.window.showWarningMessage(
           `Claude Code Cache Fix: auto-install failed (${r.reason || 'unknown'}). Run \`npm install -g claude-code-cache-fix@latest\` (or \`volta install claude-code-cache-fix@latest\`) manually.`
         );
@@ -1081,12 +849,11 @@ function activate(context) {
     }
 
     // Self-patch the upstream pipeline.mjs Windows path bug if needed. Idempotent.
-    if (interceptorReady) {
+    if (packageReady) {
       const pipelineFix = patchPipelineMjsIfNeeded();
       if (pipelineFix.patched) {
         getProxyChannel().appendLine(
-          `[${new Date().toISOString()}] Patched upstream pipeline.mjs Windows path bug (pathToFileURL). ` +
-          `Tracking: ANTHROPIC_BASE_URL still works, all 8 cache-fix extensions now load.`
+          `[${new Date().toISOString()}] Patched upstream pipeline.mjs Windows path bug (pathToFileURL).`
         );
         if (pipelineFix.restart) {
           getProxyChannel().appendLine(`[${new Date().toISOString()}] Restarting proxy to pick up the patched pipeline.`);
@@ -1097,25 +864,16 @@ function activate(context) {
       }
     }
 
-    const proxyTakingOver = autoStart && interceptorReady && !!getProxyServerPath();
-    await reconcileWrapperSetting(context, { proxyTakingOver }).catch(() => {});
-
-    if (proxyTakingOver) {
+    if (autoStart && packageReady) {
       try { await enableProxy({ silent: true }); }
       catch (err) { getProxyChannel().appendLine(`[${new Date().toISOString()}] Auto-start failed: ${err && err.message}`); }
-    } else if (isProxyEnabled() && interceptorReady) {
+    } else if (isProxyEnabled() && packageReady) {
       const r = await startProxyServer();
       if (r.status === 'spawn-failed' || r.status === 'crashed' || r.status === 'not-found') {
         vscode.window.showWarningMessage(
           `Claude Code Cache Fix: proxy mode is enabled but the server could not start (${r.status}). Check the "Claude Code Cache Fix — Proxy" output channel.`
         );
       }
-    }
-
-    // Preload-wrapper auto-enable: only if proxy mode is NOT active.
-    if (!autoStart && !isEnabled() && !isProxyEnabled() && interceptorReady && isClaudeCodeInstalled()) {
-      const wrapperPath = getWrapperPath(context);
-      if (wrapperPath) enable(context);
     }
   })().catch((err) => {
     getProxyChannel().appendLine(`[${new Date().toISOString()}] activate IIFE error: ${err && err.message}`);

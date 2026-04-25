@@ -3,6 +3,71 @@
 All notable changes to the Claude Code Cache Fix VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] — 2026-04-25
+
+Tracks upstream [`claude-code-cache-fix@3.1.0`](https://github.com/cnighswonger/claude-code-cache-fix/releases/tag/v3.1.0) and drops preload-mode wrapper support entirely. Proxy mode is the only mode now — preload didn't work on the Bun-binary CC (v2.1.113+) anyway, and shipping the 67 MB Windows wrapper .exe alongside dead code was costing every user on every download.
+
+### Removed — preload mode and wrapper
+
+- **Deleted `ClaudeCodeCacheFixWrapper.exe` (67 MB) and `wrapper.js`.** VSIX is now ~30 KB instead of ~30 MB.
+- **Removed commands `Claude Code Cache Fix: Enable` / `Disable`** (preload). The proxy commands `Enable Proxy Mode` / `Disable Proxy Mode` remain.
+- **Removed 13 preload-only settings:** `skipRelocate`, `skipContinueTrailerStrip`, `skipReminderStrip`, `skipCacheControlSticky`, `normalizeIdentity`, `normalizeCwd`, `normalizeSmoosh`, `imageKeepLast`, `stripGitStatus`, `outputEfficiencyReplacement`, `debug`, plus the preload variants of `skipSmooshSplit` / `skipDeferredToolsRestore` / `skipToolUseInputNormalize` (the names are reused for proxy-mode opt-outs — see below).
+- **Removed extension code:** `WRAPPER_SETTING` write paths, `getWrapperPath`, `ensureStableWrapperCopy`, `getStableBinDir`, `enable`/`disable`/`isEnabled`, `syncSettings` (it wrote `~/.claude/cache-fix-vscode-config.json` for the wrapper to read; nothing reads it anymore).
+- **On activate, leftover `claudeCode.claudeProcessWrapper` settings written by 0.6.x are cleared** if the path looks like ours (matches `.vscode/extensions/...claude-code-cache-fix...` or `~/.claude/cache-fix-bin/`). Third-party wrappers are not touched.
+
+### Added — sync to v3.1.0 upstream defaults
+
+Three previously dormant proxy extensions are now enabled by default in v3.1.0; the override file we write at `~/.claude/cache-fix-proxy-extensions.json` mirrors that. Real-world testing of these together recovered cache hit rate from 5.9% to 99.9% in ~2 calls.
+
+- **`smoosh-split`** (order 320) — peels `system-reminder` blocks out of tool results.
+- **`content-strip`** (order 330) — removes per-turn bookkeeping text.
+- **`tool-input-normalize`** (order 340) — cache-stable JSON serialization for `tool_use` inputs.
+
+Plus two env-var-controlled extensions, both wired through new VS Code settings:
+
+- **`prefix-diff`** — opt-in via the existing `prefixDiff` setting (now actually wires `CACHE_FIX_PREFIXDIFF=1` into the proxy spawn env; in 0.6.x it only fed the now-deleted preload wrapper). Snapshots request prefixes to `~/.claude/cache-fix-snapshots/` for diffing.
+- **`deferred-tools-restore`** — default-on in v3.1.0; opt-out via `skipDeferredToolsRestore` (sets `CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE=1`). Addresses MCP reconnect race conditions that previously shrank tool attachments and caused massive cache misses.
+
+### Changed — settings now actually wire to the proxy
+
+In 0.6.x, the proxy-mode `skip*` settings only updated the now-deleted preload wrapper config — they had **no effect on the proxy**. This is fixed: every `skip*` toggle now flips the corresponding extension's `enabled` flag in the override file we write before each proxy spawn, and changes restart the running proxy automatically.
+
+- `skipFingerprint` → `fingerprint-strip.enabled=false`
+- `skipToolSort` → `sort-stabilization.enabled=false`
+- `skipSessionStartNormalize` → `fresh-session-sort.enabled=false`
+- `skipSmooshSplit` → `smoosh-split.enabled=false` (new wiring)
+- `skipContentStrip` → `content-strip.enabled=false` (new setting + wiring)
+- `skipToolInputNormalize` → `tool-input-normalize.enabled=false` (renamed from `skipToolUseInputNormalize`, new wiring)
+- `skipCacheControlNormalize` → `cache-control-normalize.enabled=false`
+- `skipTtl` → `ttl-management.enabled=false`
+- `skipDeferredToolsRestore` → `CACHE_FIX_SKIP_DEFERRED_TOOLS_RESTORE=1` (env var, new wiring)
+- `prefixDiff` → `CACHE_FIX_PREFIXDIFF=1` (env var, new wiring)
+
+The settings panel collapsed from 5 sections / 28 toggles to 3 sections / 17 toggles — Activation (3), Corporate environments (6), Pipeline extensions (8). Less surface, but every remaining knob actually does something.
+
+### Migration
+
+Settings keys reused with new wiring:
+- `claude-code-cache-fix.skipSmooshSplit` — was preload-only, now flips the proxy `smoosh-split` extension.
+- `claude-code-cache-fix.skipDeferredToolsRestore` — was preload-only, now sets the proxy env var.
+- `claude-code-cache-fix.prefixDiff` — was preload-only, now sets the proxy env var.
+
+Setting renamed:
+- `claude-code-cache-fix.skipToolUseInputNormalize` → `claude-code-cache-fix.skipToolInputNormalize`. If you had the old key in your settings.json, copy the value to the new key — VS Code will mark the old one as "Unknown configuration setting".
+
+Settings deleted (no replacement; were preload-only and have no proxy equivalent yet upstream):
+- `skipRelocate`, `skipContinueTrailerStrip`, `skipReminderStrip`, `skipCacheControlSticky`
+- `normalizeIdentity` (proxy has `identity-normalization` always on at order 300 — same effect, no toggle), `normalizeCwd`, `normalizeSmoosh`
+- `imageKeepLast`, `outputEfficiencyReplacement`
+- `stripGitStatus` — use the native `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` environment variable instead (same effect, works on Bun-binary CC).
+- `debug` — was the preload-mode debug log toggle. The proxy has its own NDJSON telemetry at `~/.claude/cache-fix-proxy-log.ndjson` (`Open Proxy Request Log` command), always on.
+
+### Compatibility
+
+- Requires `claude-code-cache-fix@>=3.0.1` for proxy mode at minimum; `>=3.1.0` for the new default-on extensions and env-var-controlled features.
+- `httpsProxy` / `noProxy` end-to-end honored only on `>=3.0.3`.
+- VSIX no longer contains the Windows wrapper .exe — install size shrinks by ~30 MB.
+
 ## [0.6.1] — 2026-04-24
 
 Settings UX overhaul — no behavior change. Every setting now has a real markdown description citing the upstream [extension-impact-guide](https://github.com/cnighswonger/claude-code-cache-fix/blob/main/docs/extension-impact-guide.md) (measured impact, when to disable, deep link to the guide's anchor for that fix). Settings are grouped into five labeled sections in the VS Code Settings UI so the 28 toggles don't flatten into one alphabetized wall.

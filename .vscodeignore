@@ -1,5 +1,8 @@
-.git
+.git/**
 .gitignore
+.claude/**
+.ps-temp/**
+docs/**
 *.vsix
 
 # fork-only working docs and reference copies — not part of the published extension
@@ -8,6 +11,10 @@ CURRENT_BODY.md
 ISSUE_BODY.md
 UPSTREAM_ISSUE.md
 PR_BODY.md
+PR_061_BODY.md
+EXT_PR_BODY.md
+RELEASE_NOTES_*.md
 TUTORIAL_proxy_and_tls.md
+UPGRADE_NOTES_*.md
 fix.patch
 claude-code-proxy-config/**
