@@ -1,0 +1,51 @@
+{
+  "name": "claude-code-cache-fix",
+  "version": "3.0.1",
+  "description": "Cache optimization proxy and interceptor for Claude Code. Fixes prompt cache bugs, stabilizes prefix, reduces quota burn.",
+  "type": "module",
+  "exports": "./preload.mjs",
+  "main": "./preload.mjs",
+  "bin": {
+    "cache-fix-proxy": "./bin/claude-via-proxy.mjs"
+  },
+  "files": [
+    "preload.mjs",
+    "postinstall.js",
+    "tools/",
+    "claude-fixed.bat",
+    "proxy/",
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "postinstall": "node postinstall.js"
+  },
+  "dependencies": {
+    "hpagent": "^1.2.0"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "prompt-cache",
+    "cache-fix",
+    "anthropic",
+    "cost-optimization"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cnighswonger/claude-code-cache-fix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cnighswonger/claude-code-cache-fix/issues"
+  },
+  "homepage": "https://github.com/cnighswonger/claude-code-cache-fix#readme",
+  "funding": {
+    "type": "individual",
+    "url": "https://buymeacoffee.com/vsits"
+  },
+  "license": "MIT",
+  "author": "Chris Nighswonger <chris@veritassuperaitsolutions.com> (https://veritassuperaitsolutions.com)"
+}

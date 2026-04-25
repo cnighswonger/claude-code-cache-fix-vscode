@@ -1,0 +1,75 @@
+{
+  "name": "claude-code-proxy-config",
+  "displayName": "Claude Code Proxy Config",
+  "description": "Configure HTTP proxy and custom CA certificates for Claude Code Cache Fix proxy in corporate environments (Zscaler, Netskope, etc.)",
+  "version": "1.0.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "proxy",
+    "zscaler",
+    "corporate",
+    "ssl",
+    "certificate"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claude-code-proxy-config.showStatus",
+        "title": "Claude Code Proxy Config: Show Status"
+      },
+      {
+        "command": "claude-code-proxy-config.testConnection",
+        "title": "Claude Code Proxy Config: Test Connection to Anthropic API"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Code Proxy Config",
+      "properties": {
+        "claude-code-proxy-config.httpsProxy": {
+          "type": "string",
+          "default": "",
+          "description": "HTTP(S) proxy URL for upstream requests (e.g., http://proxy.corp.example:8080). Leave empty to use system HTTPS_PROXY/HTTP_PROXY environment variables."
+        },
+        "claude-code-proxy-config.noProxy": {
+          "type": "string",
+          "default": "localhost,127.0.0.1,::1,.local",
+          "description": "Comma-separated list of hosts to bypass the proxy. Supports wildcards like '.corp.example'."
+        },
+        "claude-code-proxy-config.caFile": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a PEM file containing extra CA certificates (for SSL-inspecting proxies like Zscaler). Alternative to NODE_EXTRA_CA_CERTS."
+        },
+        "claude-code-proxy-config.rejectUnauthorized": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify TLS certificates. DISABLE ONLY AS A LAST RESORT while waiting for IT to provide the corporate CA bundle."
+        },
+        "claude-code-proxy-config.autoExportCerts": {
+          "type": "boolean",
+          "default": false,
+          "description": "(Windows only) Automatically export Zscaler/corporate certificates from Windows cert store to a PEM bundle on activation."
+        },
+        "claude-code-proxy-config.certSearchPatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["*Zscaler*", "*Netskope*", "*Forcepoint*"],
+          "description": "Certificate subject patterns to include when auto-exporting (Windows only)."
+        }
+      }
+    }
+  }
+}

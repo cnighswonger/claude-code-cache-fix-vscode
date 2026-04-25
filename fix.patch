@@ -1,0 +1,509 @@
+diff --git a/extension.js b/extension.js
+index 7f4caba..bf5dff3 100644
+--- a/extension.js
++++ b/extension.js
+@@ -1,12 +1,90 @@
+ const vscode = require('vscode');
+ const path = require('path');
+ const fs = require('fs');
+-const { execSync } = require('child_process');
++const http = require('http');
++const { execSync, spawn } = require('child_process');
+ 
+ const WRAPPER_SETTING = 'claudeCode.claudeProcessWrapper';
+ const ENV_SETTING = 'claudeCode.environmentVariables';
+ const CONFIG_KEY = 'claude-code-cache-fix';
+-const DEFAULT_PROXY_URL = 'http://127.0.0.1:9801';
++const PROXY_HOST = '127.0.0.1';
++const PROXY_PORT = 9801;
++const DEFAULT_PROXY_URL = `http://${PROXY_HOST}:${PROXY_PORT}`;
++
++let proxyProcess = null;
++let proxyChannel = null;
++
++function getProxyChannel() {
++  if (!proxyChannel) {
++    proxyChannel = vscode.window.createOutputChannel('Claude Code Cache Fix — Proxy');
++  }
++  return proxyChannel;
++}
++
++function probeProxyRunning(timeoutMs = 800) {
++  return new Promise((resolve) => {
++    const req = http.request(
++      { host: PROXY_HOST, port: PROXY_PORT, path: '/health', method: 'GET', timeout: timeoutMs },
++      (res) => {
++        res.resume();
++        resolve(res.statusCode === 200);
++      }
++    );
++    req.on('error', () => resolve(false));
++    req.on('timeout', () => { req.destroy(); resolve(false); });
++    req.end();
++  });
++}
++
++async function startProxyServer() {
++  if (proxyProcess && proxyProcess.exitCode === null) {
++    return { status: 'already-managed' };
++  }
++  if (await probeProxyRunning()) {
++    return { status: 'already-external' };
++  }
++  const proxyPath = getProxyServerPath();
++  if (!proxyPath) {
++    return { status: 'not-found' };
++  }
++  const channel = getProxyChannel();
++  channel.appendLine(`[${new Date().toISOString()}] Starting proxy: ${proxyPath}`);
++  try {
++    const child = spawn(process.execPath, [proxyPath], {
++      cwd: path.dirname(proxyPath),
++      env: process.env,
++      stdio: ['ignore', 'pipe', 'pipe'],
++      windowsHide: true,
++    });
++    child.stdout.on('data', (d) => channel.append(d.toString()));
++    child.stderr.on('data', (d) => channel.append(d.toString()));
++    child.on('exit', (code, signal) => {
++      channel.appendLine(`[${new Date().toISOString()}] Proxy exited (code=${code}, signal=${signal})`);
++      if (proxyProcess === child) proxyProcess = null;
++    });
++    proxyProcess = child;
++    // Wait briefly for the listen message, then probe.
++    for (let i = 0; i < 20; i++) {
++      await new Promise((r) => setTimeout(r, 100));
++      if (await probeProxyRunning(300)) return { status: 'started' };
++      if (child.exitCode !== null) return { status: 'crashed' };
++    }
++    return { status: 'started-unverified' };
++  } catch (err) {
++    channel.appendLine(`[${new Date().toISOString()}] Spawn failed: ${err.message}`);
++    return { status: 'spawn-failed', error: err.message };
++  }
++}
++
++function stopProxyServer() {
++  if (!proxyProcess) return false;
++  try {
++    proxyProcess.kill();
++  } catch {}
++  proxyProcess = null;
++  getProxyChannel().appendLine(`[${new Date().toISOString()}] Proxy stop requested`);
++  return true;
++}
+ 
+ /**
+  * Get npm global root, cached.
+@@ -41,30 +119,119 @@ function isClaudeCodeInstalled() {
+   return fs.existsSync(path.join(npmRoot, '@anthropic-ai', 'claude-code', 'cli.js'));
+ }
+ 
++/**
++ * Stable on-disk location for the wrapper, shared across extension updates.
++ * Writing the wrapper setting to this path avoids the "folder changes on every update"
++ * breakage where claudeCode.claudeProcessWrapper rots to point at a prior version's extension dir.
++ */
++function getStableBinDir() {
++  return path.join(require('os').homedir(), '.claude', 'cache-fix-bin');
++}
++function getStableWrapperPath() {
++  const ext = process.platform === 'win32' ? 'ClaudeCodeCacheFixWrapper.exe' : 'wrapper.js';
++  return path.join(getStableBinDir(), ext);
++}
++
++/**
++ * Mirror the bundled wrapper into the stable bin dir if it's missing or outdated.
++ * Returns the stable path on success, null on failure.
++ */
++function ensureStableWrapperCopy(context) {
++  const srcName = process.platform === 'win32' ? 'ClaudeCodeCacheFixWrapper.exe' : 'wrapper.js';
++  const src = path.join(context.extensionPath, srcName);
++  if (!fs.existsSync(src)) return null;
++  const dstDir = getStableBinDir();
++  const dst = path.join(dstDir, srcName);
++  try {
++    fs.mkdirSync(dstDir, { recursive: true });
++    const srcStat = fs.statSync(src);
++    let needsCopy = true;
++    if (fs.existsSync(dst)) {
++      const dstStat = fs.statSync(dst);
++      if (dstStat.size === srcStat.size && dstStat.mtimeMs >= srcStat.mtimeMs) {
++        needsCopy = false;
++      }
++    }
++    if (needsCopy) {
++      fs.copyFileSync(src, dst);
++      // Preserve mtime so later comparisons stay sensible.
++      fs.utimesSync(dst, srcStat.atime, srcStat.mtime);
++    }
++    return dst;
++  } catch {
++    return null;
++  }
++}
++
+ /**
+  * Get the path to the appropriate wrapper for this platform.
+- * Windows: bundled .exe native bridge
+- * Linux/macOS: wrapper.js (Node.js script)
++ * Preference order:
++ *  1. npm-global tools/ (stable)
++ *  2. ~/.claude/cache-fix-bin/ stable copy (stable across extension updates)
++ *  3. bundled in extension directory (versioned path — last resort)
+  */
+ function getWrapperPath(context) {
+   if (process.platform === 'win32') {
+-    // Windows needs a native .exe because spawn() doesn't support .js/.bat
+-    // Check npm global first — stable across extension updates
+     const npmRoot = getNpmRoot();
+     if (npmRoot) {
+       const npmExe = path.join(npmRoot, 'claude-code-cache-fix', 'tools', 'ClaudeCodeCacheFixWrapper.exe');
+       if (fs.existsSync(npmExe)) return npmExe;
+     }
+-    // Fallback: bundled in extension directory (changes on every update)
++    const stable = getStableWrapperPath();
++    if (fs.existsSync(stable)) return stable;
+     const exePath = path.join(context.extensionPath, 'ClaudeCodeCacheFixWrapper.exe');
+-    if (fs.existsSync(exePath)) {
+-      return exePath;
+-    }
+-    return null; // No exe available
++    if (fs.existsSync(exePath)) return exePath;
++    return null;
+   }
++  const stable = getStableWrapperPath();
++  if (fs.existsSync(stable)) return stable;
+   return path.join(context.extensionPath, 'wrapper.js');
+ }
+ 
++/**
++ * Is the currently-written wrapper setting one we control? (Matches our extension folder
++ * or our stable bin dir — we should never touch a wrapper that belongs to someone else.)
++ */
++function isOurWrapperSetting(current, context) {
++  if (typeof current !== 'string' || !current) return false;
++  const lc = current.toLowerCase();
++  const extLc = (context.extensionPath || '').toLowerCase();
++  const stableLc = getStableBinDir().toLowerCase();
++  if (lc.includes('claude-code-cache-fix') && lc.includes('.vscode-insiders\\extensions')) return true;
++  if (lc.includes('claude-code-cache-fix') && lc.includes('.vscode\\extensions')) return true;
++  if (lc.includes('claude-code-cache-fix') && lc.includes('cursor\\extensions')) return true;
++  if (extLc && lc.startsWith(extLc)) return true;
++  if (lc.startsWith(stableLc)) return true;
++  return false;
++}
++
++/**
++ * Repair a stale wrapper setting left behind by a prior extension version.
++ * Either rewrites it to the stable path, or clears it if proxy mode is taking over.
++ */
++async function reconcileWrapperSetting(context, { proxyTakingOver }) {
++  const config = vscode.workspace.getConfiguration();
++  const current = config.get(WRAPPER_SETTING);
++  if (!current) return;
++  if (!isOurWrapperSetting(current, context)) return;
++
++  if (proxyTakingOver) {
++    await config.update(WRAPPER_SETTING, undefined, vscode.ConfigurationTarget.Global);
++    return;
++  }
++
++  const stable = ensureStableWrapperCopy(context) || getWrapperPath(context);
++  if (!stable) {
++    if (!fs.existsSync(current)) {
++      await config.update(WRAPPER_SETTING, undefined, vscode.ConfigurationTarget.Global);
++    }
++    return;
++  }
++  if (path.normalize(current).toLowerCase() !== path.normalize(stable).toLowerCase()) {
++    await config.update(WRAPPER_SETTING, stable, vscode.ConfigurationTarget.Global);
++  }
++}
++
+ /**
+  * Check if the wrapper is currently configured.
+  */
+@@ -103,6 +270,9 @@ async function enable(context) {
+     return;
+   }
+ 
++  // Mirror the bundled wrapper into a stable per-user location so the saved setting
++  // survives extension updates (the versioned extension folder changes on every bump).
++  ensureStableWrapperCopy(context);
+   const wrapperPath = getWrapperPath(context);
+ 
+   // Windows-specific: need the .exe bridge
+@@ -186,6 +356,8 @@ async function showStatus(context) {
+ 
+   const proxyEnabled = isProxyEnabled();
+   const proxyPath = getProxyServerPath();
++  const proxyListening = await probeProxyRunning(500);
++  const proxyManaged = proxyProcess && proxyProcess.exitCode === null;
+ 
+   const lines = [
+     `Platform: ${process.platform}`,
+@@ -193,19 +365,35 @@ async function showStatus(context) {
+     `Claude Code (npm) installed: ${ccInstalled ? 'Yes' : 'No'}`,
+     `Mode: ${proxyEnabled ? 'Proxy' : enabled ? 'Preload (wrapper)' : 'Disabled'}`,
+     proxyEnabled ? `Proxy URL: ${DEFAULT_PROXY_URL}` : `Wrapper path: ${wrapperPath || 'Not available'}`,
+-    `Proxy server: ${proxyPath ? 'Available (v3.0.1+)' : 'Not found (update npm package)'}`,
++    `Proxy script: ${proxyPath ? 'Available (v3.0.1+)' : 'Not found (update npm package)'}`,
++    `Proxy listening: ${proxyListening ? 'Yes' : 'No'}${proxyManaged ? ' (managed by extension)' : proxyListening ? ' (external process)' : ''}`,
+   ];
+ 
+   vscode.window.showInformationMessage('Cache Fix Status:\n' + lines.join('\n') + statsInfo);
+ }
+ 
++/**
++ * Read the ANTHROPIC_BASE_URL entry from claudeCode.environmentVariables.
++ * That setting is an ARRAY of { name, value } objects (not a flat map),
++ * so we normalize both shapes defensively in case the schema ever changes.
++ */
++function getBaseUrlFromEnvSetting() {
++  const config = vscode.workspace.getConfiguration();
++  const raw = config.get(ENV_SETTING);
++  if (Array.isArray(raw)) {
++    const hit = raw.find((e) => e && typeof e === 'object' && e.name === 'ANTHROPIC_BASE_URL');
++    return hit ? hit.value : undefined;
++  }
++  if (raw && typeof raw === 'object') return raw.ANTHROPIC_BASE_URL;
++  return undefined;
++}
++
+ /**
+  * Check if proxy mode is currently enabled.
+  */
+ function isProxyEnabled() {
+-  const config = vscode.workspace.getConfiguration();
+-  const envVars = config.get(ENV_SETTING);
+-  return envVars && envVars.ANTHROPIC_BASE_URL && envVars.ANTHROPIC_BASE_URL.includes('127.0.0.1');
++  const v = getBaseUrlFromEnvSetting();
++  return typeof v === 'string' && v.includes('127.0.0.1');
+ }
+ 
+ /**
+@@ -221,9 +409,13 @@ function getProxyServerPath() {
+ 
+ /**
+  * Enable proxy mode by setting ANTHROPIC_BASE_URL in Claude Code env vars.
++ * @param {{silent?: boolean}} opts - silent mode suppresses popups and skips the external-URL prompt
+  */
+-async function enableProxy() {
++async function enableProxy(opts = {}) {
++  const silent = !!opts.silent;
++
+   if (!isInterceptorInstalled()) {
++    if (silent) return;
+     const action = await vscode.window.showWarningMessage(
+       'claude-code-cache-fix npm package not found (v3.0.1+ required for proxy). Install with: npm install -g claude-code-cache-fix',
+       'Copy Install Command'
+@@ -236,33 +428,77 @@ async function enableProxy() {
+ 
+   const proxyPath = getProxyServerPath();
+   if (!proxyPath) {
+-    vscode.window.showWarningMessage(
+-      'Proxy server not found. Update to v3.0.1+: npm install -g claude-code-cache-fix@latest'
+-    );
++    if (!silent) {
++      vscode.window.showWarningMessage(
++        'Proxy server not found. Update to v3.0.1+: npm install -g claude-code-cache-fix@latest'
++      );
++    }
+     return;
+   }
+ 
+   const config = vscode.workspace.getConfiguration();
+-  const envVars = config.get(ENV_SETTING) || {};
+-
+-  if (envVars.ANTHROPIC_BASE_URL && !envVars.ANTHROPIC_BASE_URL.includes('127.0.0.1')) {
++  const rawEnv = config.get(ENV_SETTING);
++  // Normalize to array-of-entries, the shape the Claude Code extension actually consumes.
++  let entries;
++  if (Array.isArray(rawEnv)) entries = rawEnv.slice();
++  else if (rawEnv && typeof rawEnv === 'object') entries = Object.entries(rawEnv).map(([name, value]) => ({ name, value }));
++  else entries = [];
++
++  const existing = entries.find((e) => e && e.name === 'ANTHROPIC_BASE_URL');
++  if (existing && existing.value && !String(existing.value).includes('127.0.0.1')) {
++    if (silent) {
++      // Don't clobber a non-proxy ANTHROPIC_BASE_URL during auto-start — the user set it on purpose.
++      return;
++    }
+     const choice = await vscode.window.showWarningMessage(
+-      `ANTHROPIC_BASE_URL is already set to: ${envVars.ANTHROPIC_BASE_URL}. Replace with proxy?`,
++      `ANTHROPIC_BASE_URL is already set to: ${existing.value}. Replace with proxy?`,
+       'Replace', 'Cancel'
+     );
+     if (choice !== 'Replace') return;
+   }
+ 
+-  envVars.ANTHROPIC_BASE_URL = DEFAULT_PROXY_URL;
+-  await config.update(ENV_SETTING, envVars, vscode.ConfigurationTarget.Global);
++  if (existing) {
++    existing.value = DEFAULT_PROXY_URL;
++  } else {
++    entries.push({ name: 'ANTHROPIC_BASE_URL', value: DEFAULT_PROXY_URL });
++  }
++  await config.update(ENV_SETTING, entries, vscode.ConfigurationTarget.Global);
++
++  const startResult = await startProxyServer();
++  const baseMsg = `Proxy mode enabled (${DEFAULT_PROXY_URL}).`;
++  const restartHint = ' Restart any active Claude Code session to apply.';
++  let statusMsg;
++  switch (startResult.status) {
++    case 'started':
++      statusMsg = `${baseMsg} Proxy server auto-started.${restartHint}`;
++      break;
++    case 'started-unverified':
++      statusMsg = `${baseMsg} Proxy spawned but /health did not respond yet — check the "Claude Code Cache Fix — Proxy" output channel.${restartHint}`;
++      break;
++    case 'already-managed':
++    case 'already-external':
++      statusMsg = `${baseMsg} Proxy server already running.${restartHint}`;
++      break;
++    case 'crashed':
++      statusMsg = `${baseMsg} Proxy started but exited immediately — see the output channel.`;
++      break;
++    case 'spawn-failed':
++      statusMsg = `${baseMsg} Failed to spawn proxy: ${startResult.error || 'unknown error'}.`;
++      break;
++    case 'not-found':
++    default:
++      statusMsg = `${baseMsg} Proxy server script not found — reinstall claude-code-cache-fix@latest.`;
++      break;
++  }
+ 
+-  const action = await vscode.window.showInformationMessage(
+-    `Proxy mode enabled (${DEFAULT_PROXY_URL}). Start the proxy server, then restart any active Claude Code session.`,
+-    'Copy Start Command'
+-  );
+-  if (action === 'Copy Start Command') {
+-    await vscode.env.clipboard.writeText(`node "${proxyPath}" &`);
+-    vscode.window.showInformationMessage('Proxy start command copied to clipboard.');
++  if (silent) {
++    getProxyChannel().appendLine(`[${new Date().toISOString()}] Auto-start: ${statusMsg}`);
++    return;
++  }
++
++  const action = await vscode.window.showInformationMessage(statusMsg, 'Show Proxy Log');
++  if (action === 'Show Proxy Log') {
++    getProxyChannel().show(true);
+   }
+ }
+ 
+@@ -271,18 +507,25 @@ async function enableProxy() {
+  */
+ async function disableProxy() {
+   const config = vscode.workspace.getConfiguration();
+-  const envVars = config.get(ENV_SETTING) || {};
+-
+-  if (!envVars.ANTHROPIC_BASE_URL) {
++  const rawEnv = config.get(ENV_SETTING);
++  let entries;
++  if (Array.isArray(rawEnv)) entries = rawEnv.slice();
++  else if (rawEnv && typeof rawEnv === 'object') entries = Object.entries(rawEnv).map(([name, value]) => ({ name, value }));
++  else entries = [];
++
++  const before = entries.length;
++  entries = entries.filter((e) => !(e && e.name === 'ANTHROPIC_BASE_URL'));
++  if (entries.length === before) {
+     vscode.window.showInformationMessage('Proxy mode is not currently enabled.');
+     return;
+   }
+ 
+-  delete envVars.ANTHROPIC_BASE_URL;
+-  const hasOtherVars = Object.keys(envVars).length > 0;
+-  await config.update(ENV_SETTING, hasOtherVars ? envVars : undefined, vscode.ConfigurationTarget.Global);
++  await config.update(ENV_SETTING, entries.length > 0 ? entries : undefined, vscode.ConfigurationTarget.Global);
++  const stopped = stopProxyServer();
+   vscode.window.showInformationMessage(
+-    'Proxy mode disabled. Restart any active Claude Code session to apply.'
++    stopped
++      ? 'Proxy mode disabled and managed proxy server stopped. Restart any active Claude Code session to apply.'
++      : 'Proxy mode disabled. Restart any active Claude Code session to apply.'
+   );
+ }
+ 
+@@ -339,20 +582,48 @@ function activate(context) {
+     vscode.commands.registerCommand(`${CONFIG_KEY}.disableProxy`, () => disableProxy())
+   );
+ 
+-  // Auto-enable on first install if interceptor is available
+-  // Skip auto-enable on Windows without .exe — user needs to set up the bridge first
+-  if (!isEnabled() && isInterceptorInstalled() && isClaudeCodeInstalled()) {
++  const cfg = vscode.workspace.getConfiguration(CONFIG_KEY);
++  const autoStart = cfg.get('autoStartProxy', true);
++
++  // Mirror the bundled .exe to a stable path and repair any stale wrapper setting
++  // left behind by a prior extension version. This runs BEFORE any proxy/preload branch
++  // so a stale path doesn't live on past this activation.
++  ensureStableWrapperCopy(context);
++  const proxyTakingOver = autoStart && isInterceptorInstalled() && !!getProxyServerPath();
++  reconcileWrapperSetting(context, { proxyTakingOver }).catch(() => {});
++
++  // Auto-start proxy mode by default: set ANTHROPIC_BASE_URL (if not already set to something else)
++  // and spawn the proxy server. Preferred for CC v2.1.113+.
++  if (proxyTakingOver) {
++    enableProxy({ silent: true }).catch((err) => {
++      getProxyChannel().appendLine(`[${new Date().toISOString()}] Auto-start failed: ${err && err.message}`);
++    });
++  } else if (isProxyEnabled() && isInterceptorInstalled()) {
++    // autoStart disabled but proxy mode is already configured — still bring the server up.
++    startProxyServer().then((r) => {
++      if (r.status === 'spawn-failed' || r.status === 'crashed' || r.status === 'not-found') {
++        vscode.window.showWarningMessage(
++          `Claude Code Cache Fix: proxy mode is enabled but the server could not start (${r.status}). Check the "Claude Code Cache Fix — Proxy" output channel.`
++        );
++      }
++    });
++  }
++
++  // Preload-wrapper auto-enable: only if proxy mode is NOT active (they configure the same underlying flow).
++  if (!autoStart && !isEnabled() && !isProxyEnabled() && isInterceptorInstalled() && isClaudeCodeInstalled()) {
+     const wrapperPath = getWrapperPath(context);
+     if (wrapperPath) {
+       enable(context);
+-    } else if (process.platform === 'win32') {
+-      vscode.window.showInformationMessage(
+-        'Claude Code Cache Fix: Windows requires a native .exe wrapper for VS Code integration. See the Enable command for setup instructions.'
+-      );
+     }
+   }
+ }
+ 
+-function deactivate() {}
++function deactivate() {
++  stopProxyServer();
++  if (proxyChannel) {
++    try { proxyChannel.dispose(); } catch {}
++    proxyChannel = null;
++  }
++}
+ 
+ module.exports = { activate, deactivate };
+diff --git a/package.json b/package.json
+index 86f0c72..3294270 100644
+--- a/package.json
++++ b/package.json
+@@ -2,7 +2,7 @@
+   "name": "claude-code-cache-fix",
+   "displayName": "Claude Code Cache Fix",
+   "description": "Cache optimization for Claude Code in VS Code. Proxy mode (v3.0+) or preload interceptor. Fixes prompt cache bugs that cause excessive quota burn.",
+-  "version": "0.5.0",
++  "version": "0.5.4-autostart",
+   "publisher": "vsitsllc",
+   "license": "MIT",
+   "repository": {
+@@ -53,6 +53,11 @@
+     "configuration": {
+       "title": "Claude Code Cache Fix",
+       "properties": {
++        "claude-code-cache-fix.autoStartProxy": {
++          "type": "boolean",
++          "default": true,
++          "description": "Automatically enable proxy mode and start the local proxy server when the extension activates. Turn off to manage it manually via the command palette."
++        },
+         "claude-code-cache-fix.debug": {
+           "type": "boolean",
+           "default": false,
