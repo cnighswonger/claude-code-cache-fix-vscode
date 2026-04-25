@@ -3,6 +3,64 @@
 All notable changes to the Claude Code Cache Fix VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.3] — 2026-04-25
+
+### Changed — settings section titles shortened
+
+The three Settings-UI section titles (`contributes.configuration[].title`) were "Claude Code Cache Fix: Activation" etc. — but VS Code already groups them under "Claude Code Cache Fix" as the parent extension, so the prefix was duplicated and pushed the actual section name off-screen on narrow Settings panels. Renamed to:
+
+- `CCC: Activation`
+- `CCC: Corporate environments (proxies, custom CAs)`
+- `CCC: Pipeline extensions (opt-out toggles)`
+
+No behavior change. Setting keys (`claude-code-cache-fix.*`) are unchanged.
+
+### Fixed — auto-update on every activate
+
+Until 0.7.2, the auto-install logic only triggered when the npm package was *missing*. The `@latest` in `volta install claude-code-cache-fix@latest` was moot if we never ran the command. Result: a user who installed `claude-code-cache-fix@3.1.0` via 0.7.0 would still be on 3.1.0 weeks later, even after upstream shipped 3.1.1, 3.1.2, etc.
+
+v0.7.3 adds `maybeAutoUpdate()`. On every activate (when `autoInstallInterceptor` is on, default `true`):
+
+1. Read installed version from the package's `package.json`.
+2. Hit `https://registry.npmjs.org/claude-code-cache-fix/latest` (~200ms direct HTTPS, no `npm` spawn). Honors corporate `httpsProxy` / `caFile` / `rejectUnauthorized` settings via the existing `hpagent` agent.
+3. If installed < latest, run `volta install claude-code-cache-fix@latest` (or `npm install -g`).
+
+### Self-lock guard
+
+Volta and npm both `rm -rf` the package directory before installing. If our proxy is running out of that directory, the rm fails mid-way and leaves the install half-removed. To prevent this, `maybeAutoUpdate()` probes port 9801 first — if anything is listening (could be a proxy from another VS Code window, or a zombie from a crashed prior session), it skips the update for this activate cycle and logs a notice. Next activate retries.
+
+The check runs **before** we spawn our own proxy, so there's no self-lock from the same extension host.
+
+### Silent on failure
+
+Network down, corp proxy blocking npm, registry returning unexpected JSON — all silent (logged to the proxy output channel, no popup). Installed version keeps working. Update is best-effort, never blocking.
+
+### What you'll see in the proxy output channel
+
+```
+[2026-04-25T...] Update check: installed 3.1.0 is up to date (latest 3.1.0).
+```
+
+or, when an update lands:
+
+```
+[2026-04-25T...] Update available: 3.1.0 → 3.1.1. Installing.
+[2026-04-25T...] Cache Fix: updating 3.1.0 → 3.1.1 via volta…
+[2026-04-25T...] Updated to 3.1.1.
+```
+
+or, when locked:
+
+```
+[2026-04-25T...] Update check skipped: port 9801 is already in use, can't safely upgrade. Will retry next activate.
+```
+
+### Note on the lock condition
+
+If you have multiple VS Code windows open simultaneously, only the first one to activate wins the update; the others see the proxy already on 9801 and skip. They pick up the upgraded package on their next activate (window reload or VS Code restart) once the holder releases the port.
+
+If you ever land in a half-uninstalled state (e.g. you `Ctrl+C`'d an in-flight `volta install`), run `volta install claude-code-cache-fix@latest` from a terminal manually — it'll clean up and reinstall.
+
 ## [0.7.2] — 2026-04-25
 
 Real fix for the "stale `ANTHROPIC_BASE_URL` after uninstall" bug. The 0.7.1 attempt — clean up the persisted setting in `deactivate()` — turned out to be unreliable: VS Code unloads the extension before the async settings write commits, so the entry stayed in `settings.json` and Claude Code in VS Code kept failing with `undefined Connection error` until the user manually edited their settings.

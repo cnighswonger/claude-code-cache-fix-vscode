@@ -555,6 +555,156 @@ function isPackageInstalled() {
 }
 
 /**
+ * Read the installed claude-code-cache-fix version from its package.json.
+ * Returns null if the package isn't installed or the file is unreadable.
+ */
+function getInstalledVersion() {
+  const dir = getPackageDir();
+  if (!dir) return null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8'));
+    return typeof pkg.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the latest version from the npm registry. ~200ms direct HTTPS, no spawn.
+ * Honors corp HTTPS_PROXY / NO_PROXY / NODE_EXTRA_CA_CERTS via the existing
+ * computeProxyEnv path so users behind Zscaler/Netskope still get version checks.
+ *
+ * Returns null on network failure, timeout, or unexpected response.
+ */
+function fetchLatestVersion(timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const cfg = vscode.workspace.getConfiguration(CONFIG_KEY);
+    const httpsProxy = (cfg.get('httpsProxy') || '').trim()
+      || process.env.HTTPS_PROXY || process.env.https_proxy || '';
+    const caFile = (cfg.get('caFile') || '').trim()
+      || process.env.CACHE_FIX_PROXY_CA_FILE || process.env.NODE_EXTRA_CA_CERTS || '';
+    const rejectUnauthorized = cfg.get('rejectUnauthorized', true);
+    const ca = caFile && fs.existsSync(caFile) ? fs.readFileSync(caFile) : undefined;
+
+    let agent;
+    if (httpsProxy) {
+      try {
+        const dir = getPackageDir();
+        const hpagentPath = dir ? path.join(dir, 'node_modules', 'hpagent') : '';
+        if (hpagentPath && fs.existsSync(hpagentPath)) {
+          const { HttpsProxyAgent } = require(hpagentPath);
+          agent = new HttpsProxyAgent({ keepAlive: false, proxy: httpsProxy, rejectUnauthorized, ca });
+        }
+      } catch {}
+    }
+
+    const opts = {
+      hostname: 'registry.npmjs.org',
+      port: 443,
+      path: '/claude-code-cache-fix/latest',
+      method: 'GET',
+      headers: { 'Accept': 'application/json', 'User-Agent': 'claude-code-cache-fix-vscode' },
+      timeout: timeoutMs,
+      rejectUnauthorized,
+    };
+    if (agent) opts.agent = agent;
+    if (!agent && ca) opts.ca = ca;
+
+    const req = https.request(opts, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let body = '';
+      res.setEncoding('utf-8');
+      res.on('data', (c) => { body += c; if (body.length > 65536) { req.destroy(); resolve(null); } });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(body);
+          resolve(typeof json.version === 'string' ? json.version : null);
+        } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+/**
+ * Compare two semver strings. Returns true if `a` is strictly greater than `b`.
+ * Handles "1.2.3" and "1.2.3-rc.1" — pre-release suffix is ignored for ordering
+ * since we publish stable @latest. Robust against malformed input (returns false).
+ */
+function semverGt(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const parse = (v) => v.split('-')[0].split('.').map((n) => parseInt(n, 10));
+  const [a0 = 0, a1 = 0, a2 = 0] = parse(a);
+  const [b0 = 0, b1 = 0, b2 = 0] = parse(b);
+  if (Number.isNaN(a0) || Number.isNaN(b0)) return false;
+  if (a0 !== b0) return a0 > b0;
+  if (a1 !== b1) return a1 > b1;
+  return a2 > b2;
+}
+
+/**
+ * If the package is installed and outdated, upgrade it. Skips when:
+ *  - autoInstallInterceptor is false (user opted out)
+ *  - port 9801 is already in use (the proxy holds file locks on the package
+ *    dir; volta/npm can't remove it to reinstall — this would error and
+ *    leave the install half-removed). Tomorrow's activate will retry.
+ *  - the registry call fails (offline, corp proxy refused, etc.) — silent.
+ *
+ * Synchronous wrt activate — runs BEFORE we spawn our own proxy, so there's
+ * no self-lock. Subsequent activate steps see the freshly-installed package.
+ */
+async function maybeAutoUpdate() {
+  const cfg = vscode.workspace.getConfiguration(CONFIG_KEY);
+  if (!cfg.get('autoInstallInterceptor', true)) return;
+  if (!isPackageInstalled()) return; // separate path handles missing
+  const installed = getInstalledVersion();
+  if (!installed) return;
+
+  // If anything is listening on 9801, the package dir is locked. Don't try to
+  // update — volta/npm rm-rf's the dir before installing and would fail mid-way,
+  // leaving a half-removed package. Skip; we'll catch the update next activate.
+  if (await probeProxyRunning(500)) {
+    getProxyChannel().appendLine(
+      `[${new Date().toISOString()}] Update check skipped: port ${PROXY_PORT} is already in use, can't safely upgrade. Will retry next activate.`
+    );
+    return;
+  }
+
+  const latest = await fetchLatestVersion();
+  if (!latest) {
+    getProxyChannel().appendLine(
+      `[${new Date().toISOString()}] Update check: registry unreachable (skipped). Installed ${installed}.`
+    );
+    return;
+  }
+  if (!semverGt(latest, installed)) {
+    getProxyChannel().appendLine(
+      `[${new Date().toISOString()}] Update check: installed ${installed} is up to date (latest ${latest}).`
+    );
+    return;
+  }
+
+  getProxyChannel().appendLine(
+    `[${new Date().toISOString()}] Update available: ${installed} → ${latest}. Installing.`
+  );
+  // Reset path caches so getPackageDir/getProxyServerPath re-resolve after install.
+  _packageDir = null;
+  const r = await installPackage(`updating ${installed} → ${latest}`);
+  if (r.ok) {
+    const newVer = getInstalledVersion();
+    getProxyChannel().appendLine(
+      `[${new Date().toISOString()}] Updated to ${newVer || '?'}.`
+    );
+  } else {
+    getProxyChannel().appendLine(
+      `[${new Date().toISOString()}] Update failed: ${r.reason || 'unknown'}. Installed ${installed} still in use.`
+    );
+  }
+}
+
+/**
  * Get the path to the proxy server script (proxy/server.mjs), or null.
  */
 function getProxyServerPath() {
@@ -879,6 +1029,12 @@ function activate(context) {
           `Claude Code Cache Fix: auto-install failed (${r.reason || 'unknown'}). Run \`npm install -g claude-code-cache-fix@latest\` (or \`volta install claude-code-cache-fix@latest\`) manually.`
         );
       }
+    } else if (packageReady && autoInstall) {
+      // Already installed — check for upgrades. Runs BEFORE we spawn our own proxy
+      // (no self-lock on the package dir). Skips when port 9801 is already held
+      // by an external proxy from another window or zombie process.
+      await maybeAutoUpdate();
+      packageReady = isPackageInstalled(); // re-resolve in case install rewrote the dir
     }
 
     // Self-patch the upstream pipeline.mjs Windows path bug if needed. Idempotent.
