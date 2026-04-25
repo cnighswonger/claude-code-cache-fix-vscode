@@ -614,32 +614,81 @@ async function showStatus() {
 }
 
 /**
- * Read the ANTHROPIC_BASE_URL entry from claudeCode.environmentVariables.
- * That setting is an ARRAY of { name, value } objects (not a flat map),
- * so we normalize both shapes defensively in case the schema ever changes.
+ * In v0.7.2+, we route Claude Code through the proxy by setting
+ * `process.env.ANTHROPIC_BASE_URL` directly in the VS Code extension host
+ * (which all extensions share — see Claude Code's own spawn code, which does
+ * `{ ...process.env, ...settingsEnv }` when launching `claude`). This avoids
+ * persisting anything to `claudeCode.environmentVariables` in user
+ * settings.json — that setting outlived our extension on disable/uninstall
+ * in 0.6.x–0.7.1, leaving the user pointed at a dead 127.0.0.1:9801.
+ *
+ * `_savedBaseUrl` holds whatever value (if any) was in process.env BEFORE we
+ * touched it, so deactivate() can restore it cleanly instead of just deleting.
+ * `null` means "we haven't taken over yet."
  */
-function getBaseUrlFromEnvSetting() {
-  const config = vscode.workspace.getConfiguration();
-  const raw = config.get(ENV_SETTING);
-  if (Array.isArray(raw)) {
-    const hit = raw.find((e) => e && typeof e === 'object' && e.name === 'ANTHROPIC_BASE_URL');
-    return hit ? hit.value : undefined;
+let _savedBaseUrl = null; // null=untouched; undefined=was unset; string=was set
+function applyProxyBaseUrl() {
+  if (_savedBaseUrl === null) {
+    _savedBaseUrl = process.env.ANTHROPIC_BASE_URL; // may be undefined
   }
-  if (raw && typeof raw === 'object') return raw.ANTHROPIC_BASE_URL;
-  return undefined;
+  // Don't clobber an explicit non-proxy ANTHROPIC_BASE_URL — the user (or another
+  // tool, like AWS Bedrock / a corp router) set it on purpose.
+  if (typeof _savedBaseUrl === 'string' && _savedBaseUrl.length > 0 && !_savedBaseUrl.includes('127.0.0.1')) {
+    return { applied: false, reason: 'pre-existing non-proxy ANTHROPIC_BASE_URL' };
+  }
+  process.env.ANTHROPIC_BASE_URL = DEFAULT_PROXY_URL;
+  return { applied: true };
+}
+function restoreProxyBaseUrl() {
+  // Synchronous, reliable. Runs in deactivate() before VS Code unloads us.
+  if (_savedBaseUrl === null) return; // we never took over
+  if (_savedBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+  else process.env.ANTHROPIC_BASE_URL = _savedBaseUrl;
+  _savedBaseUrl = null;
 }
 
 /**
- * Check if proxy mode is currently enabled.
+ * Migrate users coming from 0.6.x/0.7.0/0.7.1: those versions wrote a
+ * `{ name: 'ANTHROPIC_BASE_URL', value: 'http://127.0.0.1:9801' }` entry into
+ * `claudeCode.environmentVariables` (a persisted setting). On disable/uninstall
+ * the entry stuck around and Claude Code in VS Code would fail with `Connection
+ * error` until the extension re-activated. v0.7.2 doesn't write this setting
+ * at all — we use process.env instead — so the safe move is to clean up any
+ * legacy entry on every activate. Conservative: only removes entries whose
+ * value contains 127.0.0.1, so user-set values are left alone.
+ */
+async function cleanupLegacyEnvSetting() {
+  try {
+    const config = vscode.workspace.getConfiguration();
+    const raw = config.get(ENV_SETTING);
+    let entries = Array.isArray(raw) ? raw.slice()
+      : raw && typeof raw === 'object' ? Object.entries(raw).map(([name, value]) => ({ name, value }))
+      : [];
+    const filtered = entries.filter((e) =>
+      !(e && e.name === 'ANTHROPIC_BASE_URL' && typeof e.value === 'string' && e.value.includes('127.0.0.1')));
+    if (filtered.length !== entries.length) {
+      await config.update(ENV_SETTING, filtered.length > 0 ? filtered : undefined, vscode.ConfigurationTarget.Global);
+      getProxyChannel().appendLine(
+        `[${new Date().toISOString()}] Cleaned up legacy claudeCode.environmentVariables entry (0.6.x–0.7.1 wrote it; v0.7.2 uses process.env instead).`
+      );
+    }
+  } catch {}
+}
+
+/**
+ * Check if proxy mode is currently enabled (i.e. our process.env override is in place).
  */
 function isProxyEnabled() {
-  const v = getBaseUrlFromEnvSetting();
+  const v = process.env.ANTHROPIC_BASE_URL;
   return typeof v === 'string' && v.includes('127.0.0.1');
 }
 
 /**
- * Enable proxy mode by setting ANTHROPIC_BASE_URL in Claude Code env vars.
- * @param {{silent?: boolean}} opts - silent mode suppresses popups and skips the external-URL prompt
+ * Enable proxy mode: route Claude Code through the local proxy by setting
+ * `process.env.ANTHROPIC_BASE_URL` (inherited by Claude Code's spawned `claude`
+ * subprocess) and starting the proxy server.
+ *
+ * @param {{silent?: boolean}} opts - silent mode suppresses popups
  */
 async function enableProxy(opts = {}) {
   const silent = !!opts.silent;
@@ -656,33 +705,18 @@ async function enableProxy(opts = {}) {
     return;
   }
 
-  const config = vscode.workspace.getConfiguration();
-  const rawEnv = config.get(ENV_SETTING);
-  // Normalize to array-of-entries, the shape the Claude Code extension actually consumes.
-  let entries;
-  if (Array.isArray(rawEnv)) entries = rawEnv.slice();
-  else if (rawEnv && typeof rawEnv === 'object') entries = Object.entries(rawEnv).map(([name, value]) => ({ name, value }));
-  else entries = [];
-
-  const existing = entries.find((e) => e && e.name === 'ANTHROPIC_BASE_URL');
-  if (existing && existing.value && !String(existing.value).includes('127.0.0.1')) {
-    if (silent) {
-      // Don't clobber a non-proxy ANTHROPIC_BASE_URL during auto-start — the user set it on purpose.
-      return;
-    }
+  const apply = applyProxyBaseUrl();
+  if (!apply.applied) {
+    if (silent) return; // don't clobber user-set non-proxy URL silently
     const choice = await vscode.window.showWarningMessage(
-      `ANTHROPIC_BASE_URL is already set to: ${existing.value}. Replace with proxy?`,
+      `ANTHROPIC_BASE_URL is already set to: ${process.env.ANTHROPIC_BASE_URL}. Replace with proxy for this VS Code session?`,
       'Replace', 'Cancel'
     );
     if (choice !== 'Replace') return;
+    // Force-apply: stash the user's value (so restore brings it back) and override.
+    _savedBaseUrl = process.env.ANTHROPIC_BASE_URL;
+    process.env.ANTHROPIC_BASE_URL = DEFAULT_PROXY_URL;
   }
-
-  if (existing) {
-    existing.value = DEFAULT_PROXY_URL;
-  } else {
-    entries.push({ name: 'ANTHROPIC_BASE_URL', value: DEFAULT_PROXY_URL });
-  }
-  await config.update(ENV_SETTING, entries, vscode.ConfigurationTarget.Global);
 
   const startResult = await startProxyServer();
   const baseMsg = `Proxy mode enabled (${DEFAULT_PROXY_URL}).`;
@@ -723,24 +757,18 @@ async function enableProxy(opts = {}) {
 }
 
 /**
- * Disable proxy mode by removing ANTHROPIC_BASE_URL.
+ * Disable proxy mode for this VS Code session: restore process.env.ANTHROPIC_BASE_URL
+ * to its pre-activation value (or unset it if there was none) and stop the proxy.
+ * Also cleans up any stale persisted entry from 0.6.x–0.7.1 in case the user is
+ * mid-migration.
  */
 async function disableProxy() {
-  const config = vscode.workspace.getConfiguration();
-  const rawEnv = config.get(ENV_SETTING);
-  let entries;
-  if (Array.isArray(rawEnv)) entries = rawEnv.slice();
-  else if (rawEnv && typeof rawEnv === 'object') entries = Object.entries(rawEnv).map(([name, value]) => ({ name, value }));
-  else entries = [];
-
-  const before = entries.length;
-  entries = entries.filter((e) => !(e && e.name === 'ANTHROPIC_BASE_URL'));
-  if (entries.length === before) {
+  if (!isProxyEnabled()) {
     vscode.window.showInformationMessage('Proxy mode is not currently enabled.');
     return;
   }
-
-  await config.update(ENV_SETTING, entries.length > 0 ? entries : undefined, vscode.ConfigurationTarget.Global);
+  restoreProxyBaseUrl();
+  await cleanupLegacyEnvSetting();
   const stopped = stopProxyServer();
   vscode.window.showInformationMessage(
     stopped
@@ -831,6 +859,11 @@ function activate(context) {
   // versioned extension folder.
   clearOurWrapperSetting().catch(() => {});
 
+  // v0.7.2: ANTHROPIC_BASE_URL no longer goes into claudeCode.environmentVariables
+  // (it stuck around past disable/uninstall and broke Claude Code in VS Code with
+  // "Connection error"). Strip any legacy entry written by 0.6.x–0.7.1.
+  cleanupLegacyEnvSetting().catch(() => {});
+
   // Wrapped in an IIFE so activate() returns synchronously.
   (async () => {
     // Auto-export Windows corporate certs (if enabled) BEFORE we compute proxy env,
@@ -880,27 +913,11 @@ function activate(context) {
   });
 }
 
-async function deactivate() {
+function deactivate() {
+  // Synchronous cleanup — runs reliably even when VS Code unloads us before
+  // async work completes (the bug that broke 0.7.1's settings.json cleanup).
   stopProxyServer();
-  // Remove the ANTHROPIC_BASE_URL entry we wrote on activate, so Claude Code
-  // falls back to direct upstream when this extension is disabled/uninstalled.
-  // Otherwise the persisted setting keeps pointing at a dead 127.0.0.1:9801
-  // and every Claude Code request fails with `Connection error` until the
-  // extension re-activates.
-  // The filter is conservative — only removes entries whose value contains
-  // 127.0.0.1, so a user-set value (corp proxy, mitmproxy, etc.) is left alone.
-  try {
-    const config = vscode.workspace.getConfiguration();
-    const raw = config.get(ENV_SETTING);
-    let entries = Array.isArray(raw) ? raw.slice()
-      : raw && typeof raw === 'object' ? Object.entries(raw).map(([name, value]) => ({ name, value }))
-      : [];
-    const filtered = entries.filter((e) =>
-      !(e && e.name === 'ANTHROPIC_BASE_URL' && typeof e.value === 'string' && e.value.includes('127.0.0.1')));
-    if (filtered.length !== entries.length) {
-      await config.update(ENV_SETTING, filtered.length > 0 ? filtered : undefined, vscode.ConfigurationTarget.Global);
-    }
-  } catch {}
+  restoreProxyBaseUrl();
   if (proxyChannel) {
     try { proxyChannel.dispose(); } catch {}
     proxyChannel = null;

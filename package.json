@@ -2,7 +2,7 @@
   "name": "claude-code-cache-fix",
   "displayName": "Claude Code Cache Fix",
   "description": "Auto-starts the claude-code-cache-fix proxy for Claude Code in VS Code. Fixes prompt-cache instability that causes excessive quota burn. Tracks upstream npm v3.1.0.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "vsitsllc",
   "license": "MIT",
   "repository": {

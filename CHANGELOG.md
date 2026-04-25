@@ -3,6 +3,48 @@
 All notable changes to the Claude Code Cache Fix VS Code extension.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.2] — 2026-04-25
+
+Real fix for the "stale `ANTHROPIC_BASE_URL` after uninstall" bug. The 0.7.1 attempt — clean up the persisted setting in `deactivate()` — turned out to be unreliable: VS Code unloads the extension before the async settings write commits, so the entry stayed in `settings.json` and Claude Code in VS Code kept failing with `undefined Connection error` until the user manually edited their settings.
+
+### Changed — `process.env` instead of persisted user setting
+
+Instead of writing `ANTHROPIC_BASE_URL` to `claudeCode.environmentVariables` (a persisted setting in `~/.../User/settings.json`), v0.7.2 sets `process.env.ANTHROPIC_BASE_URL` directly in the VS Code extension host. All extensions in a VS Code window share one Node.js process and therefore one `process.env`; Claude Code's spawn explicitly merges `process.env` with `claudeCode.environmentVariables` when launching `claude`:
+
+```js
+// Verified in anthropic.claude-code 2.1.120, the function that builds the spawn env:
+function OV(V) {
+  let K = _14(e6("environmentVariables")),
+      B = { ...process.env };                // ← inherits parent env
+  if (V) B.PATH = V;
+  B.MCP_CONNECTION_NONBLOCKING = "true";
+  for (let x of K) if (x.name) B[x.name] = x.value || "";
+  return B.CLAUDE_CODE_ENTRYPOINT = "claude-vscode", B;
+}
+```
+
+So setting `process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9801'` in our `activate()` is enough — Claude Code's `claude` subprocess inherits it. Nothing is written to user settings.
+
+### Why this is reliable on disable/uninstall
+
+`process.env` is in-memory state of the extension host. Modification is **synchronous**. `deactivate()` does a synchronous `delete process.env.ANTHROPIC_BASE_URL` (or restores the prior value if there was one) before VS Code unloads us — no async race with the settings service. On VS Code restart with our extension uninstalled, the host starts fresh: nothing for Claude Code to inherit, traffic goes direct to `api.anthropic.com`. The user's `settings.json` is never touched.
+
+### Added — automatic legacy cleanup on activate
+
+For users upgrading from 0.6.x / 0.7.0 / 0.7.1 who already have a stale `ANTHROPIC_BASE_URL` entry in `claudeCode.environmentVariables`: every activate now runs `cleanupLegacyEnvSetting()`, which removes any entry whose value contains `127.0.0.1`. User-set values (corp proxy, AWS Bedrock router, mitmproxy) are left alone.
+
+### Preserves user-set values
+
+If `process.env.ANTHROPIC_BASE_URL` is already set to a non-proxy URL when activate runs (e.g. user has it exported in their shell, or another tool sets it), we save it before overriding and restore it on deactivate. The `Enable Proxy Mode` command prompts before clobbering an explicit non-proxy value.
+
+### Removed
+- All writes to `claudeCode.environmentVariables` from this extension. The setting is read-only from our perspective now (only inspected by `cleanupLegacyEnvSetting`).
+- `getBaseUrlFromEnvSetting()` (no longer needed; `isProxyEnabled()` checks `process.env` directly).
+
+### Tradeoffs vs. 0.7.1
+- **Per-window scope**: process.env modification only affects the current VS Code window. Each window's extension host is independent. This is correct — proxy is per-window anyway (one proxy child per window).
+- **No persistence across VS Code restart**: `autoStartProxy` (default `true`) re-applies on every activate, so no UX impact. Manual `Enable Proxy Mode` is also session-scoped, but `autoStartProxy` covers the common case.
+
 ## [0.7.1] — 2026-04-25
 
 Bugfix release.
